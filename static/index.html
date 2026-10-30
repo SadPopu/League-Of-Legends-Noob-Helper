@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Noob Helper</title>
+  <link rel="stylesheet" href="/static/style.css?v=9">
+</head>
+<body>
+<header>
+  <h1>Noob Helper</h1>
+  <div id="status" class="status">
+    <span id="st-lcu" class="pill">Client: ?</span>
+    <span id="st-me" class="pill"></span>
+    <span id="st-phase" class="pill"></span>
+  </div>
+  <nav>
+    <button data-tab="cs" class="active">Champ Select</button>
+    <button data-tab="hist">Match History</button>
+    <button data-tab="mains">Mains</button>
+    <button data-tab="pg">Post-game</button>
+    <button data-tab="data">My data</button>
+  </nav>
+</header>
+
+<main>
+  <!-- CHAMP SELECT -->
+  <section id="tab-cs" class="tab active">
+    <div id="cs-idle" class="empty">Waiting for champ select… (open the LoL client and join a queue, or use the simulator below)</div>
+    <div id="cs-live" hidden>
+      <div class="teams">
+        <div class="team">
+          <h3>Your team</h3>
+          <ul id="allies"></ul>
+        </div>
+        <div class="team">
+          <h3>Enemies <small id="enemy-roles"></small></h3>
+          <ul id="enemies"></ul>
+        </div>
+        <div class="team bans">
+          <h3>Bans</h3>
+          <div id="bans"></div>
+        </div>
+      </div>
+
+      <div class="cards">
+        <article class="card" id="picks-card">
+          <h2>Pick suggestions <small id="picks-pos"></small></h2>
+          <div class="subtabs">
+            <button data-sub="mine" class="active">My champs</button>
+            <button data-sub="counters">Counters (high elo)</button>
+            <button data-sub="mains">Mains</button>
+          </div>
+          <p id="picks-warning" class="warn" hidden></p>
+          <ol id="picks" class="picklist"></ol>
+          <ol id="counters" class="picklist" hidden></ol>
+          <div id="cs-mains" hidden><p class="muted">Pick (or hover) a champion to see its mains.</p></div>
+        </article>
+        <article class="card" id="build-card" hidden>
+          <h2>Build <small id="build-title"></small></h2>
+          <div id="build"></div>
+        </article>
+      </div>
+    </div>
+
+    <details class="sim">
+      <summary>Champ select simulator (test without queueing)</summary>
+      <form id="sim-form">
+        <label>Your role
+          <select name="position">
+            <option>TOP</option><option>JUNGLE</option><option selected>MIDDLE</option><option>BOTTOM</option><option>UTILITY</option>
+          </select>
+        </label>
+        <label>Your champion <input name="champion" list="champ-list" placeholder="(empty = not picked yet)"></label>
+        <label class="inline"><input type="checkbox" name="locked"> Lock in</label>
+        <label>Allies (role:champion, comma separated) <input name="allies" placeholder="TOP:Garen, JUNGLE:Lee Sin"></label>
+        <label>Enemies <input name="enemies" placeholder="Darius, Ahri, Vi"></label>
+        <label>Bans <input name="bans" placeholder="Yasuo, Zed"></label>
+        <div class="row">
+          <button type="submit">Simulate</button>
+          <button type="button" id="sim-end" class="secondary">End</button>
+        </div>
+      </form>
+      <datalist id="champ-list"></datalist>
+    </details>
+  </section>
+
+  <!-- POST-GAME -->
+  <section id="tab-pg" class="tab">
+    <div class="row">
+      <button id="pg-analyse">Analyse my last game</button>
+      <span id="pg-msg" class="muted"></span>
+    </div>
+    <div class="row pg-cats" id="pg-cats"></div>
+    <div id="pg-list"></div>
+  </section>
+
+  <!-- MATCH HISTORY -->
+  <section id="tab-hist" class="tab">
+    <div class="subtabs" id="hist-groups">
+      <button data-group="all" class="active">All <small></small></button>
+      <button data-group="solo">Ranked Solo/Duo <small></small></button>
+      <button data-group="flex">Ranked Flex <small></small></button>
+      <button data-group="normal">Normals <small></small></button>
+      <button data-group="aram">ARAM <small></small></button>
+      <button data-group="other">Other <small></small></button>
+    </div>
+    <div id="hist-summary"></div>
+    <div id="hist-list"></div>
+    <div class="row"><button id="hist-more" class="secondary" hidden>Load more</button></div>
+  </section>
+
+  <!-- MAINS -->
+  <section id="tab-mains" class="tab">
+    <article class="card">
+      <div class="row">
+        <strong>Challenger + Grandmaster masteries</strong>
+        <label class="inline"><input type="checkbox" class="mastery-region" value="euw1" checked> EUW</label>
+        <label class="inline"><input type="checkbox" class="mastery-region" value="kr" checked> KR</label>
+        <button id="mastery-crawl" data-job="mastery">Collect masteries</button>
+        <span id="job-mastery" class="muted"></span>
+      </div>
+      <p class="muted small-note"><span id="mains-count"></span> · ~1000 players per region, 1 request each (~20 min, regions in parallel). Players checked in the last 24 h are skipped.</p>
+    </article>
+    <div class="mains-layout">
+      <div class="card mains-list">
+        <input id="mains-search" placeholder="Search champion…">
+        <div id="mains-grid"></div>
+      </div>
+      <div class="card" id="mains-panel"><p class="muted">Pick a champion.</p></div>
+    </div>
+  </section>
+
+  <!-- MY DATA -->
+  <section id="tab-data" class="tab">
+    <article class="card">
+      <div class="row">
+        <label class="inline"><input type="checkbox" id="auto-enabled" checked> <strong>Daily automatic update</strong></label>
+        <span class="muted">While the app is open, once a day: collects high elo games (EUW + KR, with timelines), re-checks masteries and the top 5 mains, and syncs your games.</span>
+      </div>
+      <p class="muted small-note" id="auto-last"></p>
+    </article>
+    <div class="cards">
+      <article class="card">
+        <h2>Your games</h2>
+        <p class="muted">Fetches all your games since the start of the season (every queue). Feeds the Match History tab and your per-champion stats.
+          The first time can take a while (~50 games per minute); after that it only fetches new games.</p>
+        <div class="row">
+          <button id="sync" data-job="sync">Sync season</button>
+          <span id="job-sync" class="muted"></span>
+        </div>
+      </article>
+      <article class="card">
+        <h2>High elo data (meta)</h2>
+        <p class="muted">Collects recent Challenger/GM games. Matchups, runes and items come from here.
+          Each region has its own request limit, so EUW and KR collect in parallel without slowing each other down. Run it again to add more data.</p>
+        <div class="row">
+          <span class="muted">Regions:</span>
+          <label class="inline"><input type="checkbox" class="crawl-region" value="euw1" checked> EUW</label>
+          <label class="inline"><input type="checkbox" class="crawl-region" value="kr" checked> KR</label>
+          <label class="inline"><input type="checkbox" class="crawl-region" value="eun1"> EUNE</label>
+          <label class="inline"><input type="checkbox" class="crawl-region" value="na1"> NA</label>
+        </div>
+        <div class="row">
+          <label>Players <input type="number" id="crawl-players" value="100" min="5" max="1000"></label>
+          <label>Games/player <input type="number" id="crawl-per" value="20" min="5" max="100"></label>
+        </div>
+        <div class="row">
+          <label class="inline"><input type="checkbox" id="crawl-master"> Include Master</label>
+          <label class="inline"><input type="checkbox" id="crawl-tl" checked> Timelines (item order, skills, pathing)</label>
+          <label>Backfill old games <input type="number" id="crawl-backfill" value="300" min="0" max="5000"></label>
+          <button id="crawl" data-job="meta">Collect</button>
+        </div>
+        <p class="muted small-note">With timelines each game costs 2 requests: ~1500 games per hour. You can leave it running while you play.</p>
+        <p><span id="job-meta" class="muted"></span> <span id="meta-count" class="muted"></span></p>
+      </article>
+    </div>
+    <article class="card">
+      <h2>Your stats per champion
+        <select id="stats-pos">
+          <option value="">All roles</option>
+          <option>TOP</option><option>JUNGLE</option><option>MIDDLE</option><option>BOTTOM</option><option>UTILITY</option>
+        </select>
+      </h2>
+      <div class="table-wrap">
+        <table id="stats">
+          <thead><tr><th>Champion</th><th>Games</th><th>WR</th><th>KDA</th><th>CS/min</th><th>Vision/min</th><th>KP</th><th>Damage %</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+</main>
+
+<script src="/static/app.js?v=9"></script>
+</body>
+</html>
