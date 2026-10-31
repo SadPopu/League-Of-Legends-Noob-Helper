@@ -307,3 +307,5 @@ td.bad { color: var(--bad); }
 
 /* jogo a decorrer: a build do champ select fica no ecrã */
 .ingame-banner { background: rgba(63, 182, 123, .12); border-left: 3px solid var(--good); color: var(--good); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-weight: 600; }
+
+.tag.few { color: var(--muted); border-color: var(--border); }

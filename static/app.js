@@ -110,7 +110,8 @@ function renderPicks(p) {
   $("#picks-warning").hidden = !p.warning;
   $("#picks-warning").textContent = p.warning || "";
   $("#picks").innerHTML = p.candidates.length
-    ? p.candidates.map((c) => pickItem(c, `${c.games} games · ${pct(c.winrate)} WR${c.kda != null ? ` · KDA ${num(c.kda)}` : ""}`)).join("")
+    ? p.candidates.map((c) => pickItem(c, `fit ${pct(c.score)} · ${c.games} games · ${pct(c.winrate)} WR${c.kda != null ? ` · KDA ${num(c.kda)}` : ""}`,
+        c.comfort === false ? ` <span class="tag few">few games</span>` : "")).join("")
     : `<li class="muted">No data yet: sync your games and collect high elo data in the "My data" tab.</li>`;
   if (!p.from_pool && p.candidates.length)
     $("#picks").insertAdjacentHTML("afterbegin", `<p class="muted">You have no games in this role yet: suggestions are based on the high elo meta.</p>`);

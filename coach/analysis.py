@@ -1,4 +1,5 @@
 """Motor de regras do coach: sugestões de pick e de build (runas, feitiços, itens)."""
+import json
 from collections import Counter
 from itertools import permutations
 
@@ -94,6 +95,21 @@ def recommend_picks(state: ChampSelectState, db: DB, dd: DDragon, limit: int = 5
     ally_has_tank = any("Tank" in dd.champs.get(c, {}).get("tags", []) for c in ally_champs)
 
     pool = my_champion_stats(db, pos) or my_champion_stats(db)
+    # bonecos com 1–2 jogos não dizem nada: só entram se não houver alternativas suficientes
+    played = [c for c in pool if c["games"] >= MIN_POOL_GAMES and c["champion_id"] not in unavailable]
+    # os teus 10 bonecos com mais maestria também contam como "teus" se se jogam nesta posição
+    mastery = my_mastery_ranks(db)
+    if mastery:
+        have = {c["champion_id"] for c in played}
+        overall = {c["champion_id"]: c for c in my_champion_stats(db)}
+        probs = role_probabilities(db, dd, [cid for cid in mastery if cid not in have])
+        for cid in mastery:
+            if cid in have or cid in unavailable or (pos and probs[cid][pos] < 0.15):
+                continue
+            o = overall.get(cid)
+            played.append(o or {"champion_id": cid, "games": 0, "wins": 0, "winrate": None, "kda": None})
+    if len(played) >= 3:
+        pool = played
     from_pool = True
     if not pool:
         # sem histórico: usa os bonecos mais fortes na posição em high elo
@@ -105,48 +121,74 @@ def recommend_picks(state: ChampSelectState, db: DB, dd: DDragon, limit: int = 5
         for r in pool:
             r["winrate"] = wr(r["wins"], r["games"])
 
+    vs = enemy_matchups(db, dd, pos, lane_opp, state.enemies)
     candidates = []
     for c in pool:
         cid = c["champion_id"]
         if cid in unavailable:
             continue
         info = dd.champs.get(cid, {})
+        m = vs.get(cid, {"lane": None, "vs": []})
         reasons = []
-        score = (c["wins"] + 2.5) / (c["games"] + 5)  # winrate "suavizado" para poucos jogos
+        # Média ponderada de winrates "suavizados" (cada amostra começa com jogos fictícios a 50%):
+        # poucos jogos ficam perto de 50%, por isso 2 jogos a 100% não passam à frente de 30 jogos a 60%.
+        parts = []
         if from_pool:
-            score += min(c["games"], 30) / 30 * 0.03
-            reasons.append(f"{c['winrate']:.0%} WR in {c['games']} of your games")
+            parts.append((smooth(c["wins"], c["games"], PRIOR_MINE), 1.5))
+            if c["games"]:
+                reasons.append(f"your WR: {c['winrate']:.0%} in {c['games']} games"
+                               + (" (small sample)" if c["games"] < 5 else ""))
+            if cid in mastery:
+                rank, points = mastery[cid]
+                reasons.append(f"★ your #{rank} mastery ({points / 1000:.0f}k pts)")
         else:
+            parts.append((smooth(c["wins"], c["games"], PRIOR_META), 1.5))
             reasons.append(f"{c['winrate']:.0%} WR in high elo ({c['games']} games)")
 
         if lane_opp:
-            g, w = matchup(db, "meta", cid, lane_opp, pos)
-            if g >= MIN_MATCHUP_GAMES:
-                score += (w - 0.5) * min(1.0, g / 50)
-                tone = "favourable" if w >= 0.52 else "hard" if w <= 0.48 else "even"
-                reasons.append(f"{tone} matchup vs {dd.champ_name(lane_opp)}: {w:.0%} in high elo ({g} games)")
+            # o matchup de lane é o que mais pesa; sem dados conta como 50%
+            lane = m["lane"]
+            parts.append((smooth(lane["w"], lane["g"], PRIOR_META) if lane else 0.5, 3))
+            if lane and lane["g"] >= 10:
+                tone = "favourable" if lane["wr"] >= 0.52 else "hard" if lane["wr"] <= 0.48 else "even"
+                reasons.append(f"{tone} matchup vs {lane['enemy']}: {lane['wr']:.0%} in high elo ({lane['g']} games)")
+            elif lane:
+                reasons.append(f"few high elo games vs {lane['enemy']}: {lane['wr']:.0%} in {lane['g']}")
+            else:
+                reasons.append(f"no high elo data vs {dd.champ_name(lane_opp)} yet")
             mg, mw = matchup(db, "me", cid, lane_opp)
-            if mg >= 2:
-                score += (mw - 0.5) * min(1.0, mg / 10) * 0.5
-                reasons.append(f"you vs {dd.champ_name(lane_opp)}: {mw:.0%} in {mg} games")
+            if mg:
+                parts.append((smooth(round(mw * mg), mg, PRIOR_MY_MATCHUP), 1))
+                reasons.append(f"you vs {dd.champ_name(lane_opp)}: {round(mw * mg)}W {mg - round(mw * mg)}L")
+        for v in m["vs"]:
+            parts.append((smooth(v["w"], v["g"], PRIOR_META), 0.5))
+        good = [v for v in m["vs"] if v["g"] >= 10 and v["wr"] >= 0.55]
+        bad = [v for v in m["vs"] if v["g"] >= 10 and v["wr"] <= 0.45]
+        if good:
+            reasons.append("strong vs " + ", ".join(f"{v['enemy']} ({v['wr']:.0%})" for v in good))
+        if bad:
+            reasons.append("weak vs " + ", ".join(f"{v['enemy']} ({v['wr']:.0%})" for v in bad))
+        score = sum(x * w for x, w in parts) / sum(w for _, w in parts)
 
         if len(ally_champs) >= 2:
             if ally_ad >= 3 and info.get("damage") == "AP":
-                score += 0.02
+                score += 0.01
                 reasons.append("balances damage (your team is already very AD)")
             elif ally_ap >= 3 and info.get("damage") == "AD":
-                score += 0.02
+                score += 0.01
                 reasons.append("balances damage (your team is already very AP)")
             if not ally_has_tank and "Tank" in info.get("tags", []):
-                score += 0.015
+                score += 0.0075
                 reasons.append("your team has no frontline yet")
 
         candidates.append({
             "champion_id": cid, "name": dd.champ_name(cid), "icon": dd.champ_icon(cid),
             "score": round(score, 4), "games": c["games"], "winrate": c["winrate"],
             "kda": c.get("kda"), "reasons": reasons, "from_pool": from_pool,
+            # "confortável" = 3+ jogos teus ou top 10 de maestria; estes aparecem sempre primeiro
+            "comfort": not from_pool or c["games"] >= MIN_POOL_GAMES or cid in mastery,
         })
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    candidates.sort(key=lambda x: (x["comfort"], x["score"]), reverse=True)
 
     warning = None
     if state.my_champion and lane_opp and not state.locked:
@@ -376,6 +418,51 @@ def timeline_build(rows: list[dict], dd: DDragon, pos: str | None) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- matchups contra a equipa inimiga
+MIN_POOL_GAMES = 3     # mínimo de jogos teus para um boneco entrar no "My champs"
+PRIOR_MINE = 10        # jogos fictícios a 50% no teu winrate com o boneco
+PRIOR_META = 20        # idem para amostras high elo
+PRIOR_MY_MATCHUP = 4   # idem para os teus jogos contra o adversário de lane
+
+
+def my_mastery_ranks(db: DB) -> dict[int, tuple[int, int]]:
+    """Os teus 10 bonecos com mais maestria (guardados pela aba Mains): {id: (posição, pontos)}."""
+    cached = json.loads(db.kv_get("my_mastery") or "{}")
+    return {m["championId"]: (i + 1, m["championPoints"]) for i, m in enumerate(cached.get("list", []))}
+
+
+def smooth(wins: float, games: float, prior: float) -> float:
+    return (wins + prior / 2) / (games + prior)
+
+
+def enemy_matchups(db: DB, dd: DDragon, pos: str | None, lane_opp: int | None,
+                   enemies: list[int]) -> dict[int, dict]:
+    """Para cada boneco (na tua posição, em high elo): resultado contra o adversário de lane
+    e contra cada um dos outros inimigos (jogos em que esse inimigo estava na equipa adversária)."""
+    out: dict[int, dict] = {}
+    for enemy in enemies:
+        is_lane = enemy == lane_opp
+        if is_lane:
+            rows = db.query(
+                """SELECT champion_id, COUNT(*) g, SUM(win) w FROM participants
+                   WHERE source='meta' AND opponent_id=? AND (? IS NULL OR position=?) GROUP BY champion_id""",
+                (enemy, pos, pos))
+        else:
+            rows = db.query(
+                """SELECT a.champion_id, COUNT(*) g, SUM(a.win) w FROM participants a
+                   JOIN participants b ON b.match_id = a.match_id AND b.win != a.win
+                   WHERE a.source='meta' AND b.champion_id=? AND (? IS NULL OR a.position=?)
+                   GROUP BY a.champion_id""", (enemy, pos, pos))
+        for r in rows:
+            entry = {"enemy": dd.champ_name(enemy), "g": r["g"], "w": r["w"], "wr": wr(r["w"], r["g"])}
+            d = out.setdefault(r["champion_id"], {"lane": None, "vs": []})
+            if is_lane:
+                d["lane"] = entry
+            else:
+                d["vs"].append(entry)
+    return out
+
+
 # ---------------------------------------------------------------- counters (high elo)
 def recommend_counters(state: ChampSelectState, db: DB, dd: DDragon, limit: int = 8) -> dict:
     """Bonecos com melhor winrate em high elo contra a equipa inimiga atual (na tua posição).
@@ -394,31 +481,9 @@ def recommend_counters(state: ChampSelectState, db: DB, dd: DDragon, limit: int 
     if not pool:
         return {"position": pos, "lane_opponent": None, "candidates": []}
 
-    stats = {r["champion_id"]: {"g": r["g"], "w": r["w"], "lane": None, "vs": []} for r in pool
-             if r["champion_id"] not in unavailable}
-
-    for enemy in state.enemies:
-        is_lane = enemy == lane_opp
-        if is_lane:
-            rows = db.query(
-                """SELECT champion_id, COUNT(*) g, SUM(win) w FROM participants
-                   WHERE source='meta' AND opponent_id=? AND (? IS NULL OR position=?) GROUP BY champion_id""",
-                (enemy, pos, pos))
-        else:
-            rows = db.query(
-                """SELECT a.champion_id, COUNT(*) g, SUM(a.win) w FROM participants a
-                   JOIN participants b ON b.match_id = a.match_id AND b.win != a.win
-                   WHERE a.source='meta' AND b.champion_id=? AND (? IS NULL OR a.position=?)
-                   GROUP BY a.champion_id""", (enemy, pos, pos))
-        for r in rows:
-            s = stats.get(r["champion_id"])
-            if not s:
-                continue
-            entry = {"enemy": dd.champ_name(enemy), "g": r["g"], "wr": wr(r["w"], r["g"])}
-            if is_lane:
-                s["lane"] = entry
-            else:
-                s["vs"].append(entry)
+    vs = enemy_matchups(db, dd, pos, lane_opp, state.enemies)
+    stats = {r["champion_id"]: {"g": r["g"], "w": r["w"], **vs.get(r["champion_id"], {"lane": None, "vs": []})}
+             for r in pool if r["champion_id"] not in unavailable}
 
     candidates = []
     prior = 20  # jogos "fictícios" a 50% para suavizar amostras pequenas

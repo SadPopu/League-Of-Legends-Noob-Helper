@@ -326,6 +326,7 @@ async def lifespan(_: FastAPI):
     # NOOB_NO_AUTO=1 desliga as tarefas diárias (útil para testes)
     daily_task = asyncio.create_task(daily_loop() if not os.getenv("NOOB_NO_AUTO") else asyncio.sleep(0))
     await coach.resolve_me()
+    asyncio.create_task(my_mastery())  # guarda as tuas maestrias para as sugestões do champ select
     log.info("Open http://127.0.0.1:%s in your browser", config.PORT)
     yield
     lcu_task.cancel()
