@@ -304,3 +304,6 @@ td.bad { color: var(--bad); }
 .champ-tile .pts { color: var(--gold); font-size: 10px; }
 .mine-grid { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)) !important; }
 .mine-grid .champ-tile img { width: 56px; height: 56px; }
+
+/* jogo a decorrer: a build do champ select fica no ecrã */
+.ingame-banner { background: rgba(63, 182, 123, .12); border-left: 3px solid var(--good); color: var(--good); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-weight: 600; }

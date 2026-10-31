@@ -27,6 +27,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)
 log = logging.getLogger("coach")
 
 ARAM_QUEUES = {450, 2400}
+# fases do cliente em que o jogo está a decorrer (a build do champ select fica no ecrã)
+IN_GAME_PHASES = {"GameStart", "InProgress", "Reconnect", "WaitingForStats"}
+# fases em que a build do champ select anterior deixa de interessar
+CLEAR_PHASES = {"None", "Lobby", "Matchmaking", "ReadyCheck", "PreEndOfGame", "EndOfGame", "TerminatedInError"}
 
 
 class Coach:
@@ -44,6 +48,7 @@ class Coach:
         self.build_sig = None
         self.jobs: dict[str, dict] = {}
         self.postgame_task: asyncio.Task | None = None
+        self.cs_ended = False  # champ select acabou mas a build continua no ecrã (jogo a decorrer)
 
     # ---------------------------------------------------------------- broadcast
     async def send(self, msg: dict, remember: bool = True):
@@ -101,19 +106,43 @@ class Coach:
         if uri == "/lol-champ-select/v1/session":
             if data and data.get("myTeam"):
                 await self.handle_session(data)
-            else:
-                self.picks_sig = self.build_sig = None
-                for k in ("champselect", "picks", "counters", "build", "mains"):
-                    self.last.pop(k, None)
-                await self.send({"type": "champselect_end"}, remember=False)
+            elif not self.cs_ended:
+                # o champ select acabou: se foi porque o jogo começou, a build fica visível até ao fim do jogo
+                self.cs_ended = True
+                asyncio.create_task(self.after_champselect())
         elif uri == "/lol-gameflow/v1/gameflow-phase" and isinstance(data, str):
             self.phase = data
             await self.push_status()
+            if self.cs_ended and data in CLEAR_PHASES:
+                await self.clear_champselect()
             if data in ("PreEndOfGame", "EndOfGame"):
                 self.schedule_postgame()
 
+    async def after_champselect(self):
+        """Espera a fase do jogo assentar: jogo a começar → mantém; dodge/saída → limpa."""
+        await asyncio.sleep(2)
+        if not self.cs_ended:
+            return  # entretanto começou outro champ select
+        phase = await self.lcu.get("/lol-gameflow/v1/gameflow-phase") if self.lcu.connected else "None"
+        if isinstance(phase, str):
+            self.phase = phase
+        if self.phase in IN_GAME_PHASES:
+            await self.send({"type": "ingame", "phase": self.phase})
+        else:
+            await self.clear_champselect()
+
+    async def clear_champselect(self):
+        self.cs_ended = False
+        self.picks_sig = self.build_sig = None
+        for k in ("champselect", "picks", "counters", "build", "mains", "ingame"):
+            self.last.pop(k, None)
+        await self.send({"type": "champselect_end"}, remember=False)
+
     # ---------------------------------------------------------------- champ select
     async def handle_session(self, session: dict):
+        if self.cs_ended:  # novo champ select: esquece o anterior
+            self.cs_ended = False
+            self.last.pop("ingame", None)
         st = parse_session(session)
         await self.send(self.champselect_payload(st))
 

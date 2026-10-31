@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Noob Helper</title>
-  <link rel="stylesheet" href="/static/style.css?v=10">
+  <link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
 <header>
@@ -28,6 +28,7 @@
   <section id="tab-cs" class="tab active">
     <div id="cs-idle" class="empty">Waiting for champ select… (open the LoL client and join a queue, or use the simulator below)</div>
     <div id="cs-live" hidden>
+      <div id="cs-ingame" class="ingame-banner" hidden>● Game in progress: your champ select build and tips stay here until the game ends.</div>
       <div class="teams">
         <div class="team">
           <h3>Your team</h3>
@@ -196,6 +197,6 @@
   </section>
 </main>
 
-<script src="/static/app.js?v=10"></script>
+<script src="/static/app.js?v=11"></script>
 </body>
 </html>

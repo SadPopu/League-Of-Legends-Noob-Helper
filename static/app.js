@@ -37,8 +37,11 @@ function handle(msg) {
     case "mains_updated":
       if ($("#tab-mains").classList.contains("active") && mainsState.selected === msg.champion) openMains(msg.champion, true);
       return;
+    case "ingame":
+      $("#cs-ingame").hidden = false;
+      return;
     case "champselect_end":
-      $("#cs-live").hidden = true; $("#cs-idle").hidden = false; $("#build-card").hidden = true;
+      $("#cs-live").hidden = true; $("#cs-idle").hidden = false; $("#build-card").hidden = true; $("#cs-ingame").hidden = true;
       $("#cs-mains").innerHTML = ""; csWasLocked = false; return;
     case "history_updated":
       if ($("#tab-hist").classList.contains("active")) loadHistory(true);
@@ -81,6 +84,7 @@ function renderStatus(s) {
 let csWasLocked = false;
 function renderChampSelect(cs) {
   $("#cs-idle").hidden = true;
+  $("#cs-ingame").hidden = true;
   $("#cs-live").hidden = false;
   $("#allies").innerHTML = cs.allies.map((a) => `
     <li class="${a.me ? "me" : ""}">
