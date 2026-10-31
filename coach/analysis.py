@@ -18,6 +18,7 @@ HEALERS = {
 MIN_MATCHUP_GAMES = 15
 
 # Role "provável" pela classe do campeão, usada quando há poucos dados meta
+POS_LABEL = {"TOP": "top", "JUNGLE": "jungle", "MIDDLE": "mid", "BOTTOM": "ADC", "UTILITY": "support"}
 TAG_ROLE = {"Marksman": "BOTTOM", "Support": "UTILITY", "Mage": "MIDDLE",
             "Assassin": "MIDDLE", "Fighter": "TOP", "Tank": "TOP"}
 
@@ -122,6 +123,8 @@ def recommend_picks(state: ChampSelectState, db: DB, dd: DDragon, limit: int = 5
             r["winrate"] = wr(r["wins"], r["games"])
 
     vs = enemy_matchups(db, dd, pos, lane_opp, state.enemies)
+    role_of = {c: p for p, c in enemy_roles.items()}
+    weights = {e: enemy_weight(pos, role_of.get(e)) for e in state.enemies if e != lane_opp}
     candidates = []
     for c in pool:
         cid = c["champion_id"]
@@ -161,13 +164,8 @@ def recommend_picks(state: ChampSelectState, db: DB, dd: DDragon, limit: int = 5
                 parts.append((smooth(round(mw * mg), mg, PRIOR_MY_MATCHUP), 1))
                 reasons.append(f"you vs {dd.champ_name(lane_opp)}: {round(mw * mg)}W {mg - round(mw * mg)}L")
         for v in m["vs"]:
-            parts.append((smooth(v["w"], v["g"], PRIOR_META), 0.5))
-        good = [v for v in m["vs"] if v["g"] >= 10 and v["wr"] >= 0.55]
-        bad = [v for v in m["vs"] if v["g"] >= 10 and v["wr"] <= 0.45]
-        if good:
-            reasons.append("strong vs " + ", ".join(f"{v['enemy']} ({v['wr']:.0%})" for v in good))
-        if bad:
-            reasons.append("weak vs " + ", ".join(f"{v['enemy']} ({v['wr']:.0%})" for v in bad))
+            parts.append((smooth(v["w"], v["g"], PRIOR_META), weights.get(v["id"], 1)))
+        reasons += matchup_reasons(m["vs"], weights)
         score = sum(x * w for x, w in parts) / sum(w for _, w in parts)
 
         if len(ally_champs) >= 2:
@@ -435,6 +433,27 @@ def smooth(wins: float, games: float, prior: float) -> float:
     return (wins + prior / 2) / (games + prior)
 
 
+def enemy_weight(my_pos: str | None, enemy_pos: str | None) -> float:
+    """Quanto pesa um inimigo (que não é o adversário de lane) para quem joga na tua posição:
+    o outro botlaner inimigo conta muito para ADC/suporte, o jungler um pouco mais que as outras lanes."""
+    if my_pos in ("BOTTOM", "UTILITY") and enemy_pos in ("BOTTOM", "UTILITY"):
+        return 2.0
+    if enemy_pos == "JUNGLE":
+        return 1.25
+    return 1.0
+
+
+def matchup_reasons(vs: list[dict], weights: dict[int, float]) -> list[str]:
+    """Texto com o resultado contra cada inimigo já escolhido (os mais relevantes primeiro)."""
+    out = []
+    for v in sorted(vs, key=lambda v: -weights.get(v["id"], 1)):
+        if v["g"] < 10:
+            continue
+        tone = "strong" if v["wr"] >= 0.53 else "weak" if v["wr"] <= 0.47 else "even"
+        out.append(f"{tone} vs {v['enemy']}: {v['wr']:.0%} ({v['g']} games)")
+    return out
+
+
 def enemy_matchups(db: DB, dd: DDragon, pos: str | None, lane_opp: int | None,
                    enemies: list[int]) -> dict[int, dict]:
     """Para cada boneco (na tua posição, em high elo): resultado contra o adversário de lane
@@ -454,7 +473,7 @@ def enemy_matchups(db: DB, dd: DDragon, pos: str | None, lane_opp: int | None,
                    WHERE a.source='meta' AND b.champion_id=? AND (? IS NULL OR a.position=?)
                    GROUP BY a.champion_id""", (enemy, pos, pos))
         for r in rows:
-            entry = {"enemy": dd.champ_name(enemy), "g": r["g"], "w": r["w"], "wr": wr(r["w"], r["g"])}
+            entry = {"id": enemy, "enemy": dd.champ_name(enemy), "g": r["g"], "w": r["w"], "wr": wr(r["w"], r["g"])}
             d = out.setdefault(r["champion_id"], {"lane": None, "vs": []})
             if is_lane:
                 d["lane"] = entry
@@ -485,26 +504,26 @@ def recommend_counters(state: ChampSelectState, db: DB, dd: DDragon, limit: int 
     stats = {r["champion_id"]: {"g": r["g"], "w": r["w"], **vs.get(r["champion_id"], {"lane": None, "vs": []})}
              for r in pool if r["champion_id"] not in unavailable}
 
+    role_of = {c: p for p, c in enemy_roles.items()}
+    weights = {e: enemy_weight(pos, role_of.get(e)) for e in state.enemies if e != lane_opp}
     candidates = []
-    prior = 20  # jogos "fictícios" a 50% para suavizar amostras pequenas
     for cid, s in stats.items():
-        base = (s["w"] + prior / 2) / (s["g"] + prior)
-        score, weight = base, 1.0
+        # sem inimigos escolhidos o winrate geral decide; com inimigos passa a pesar pouco
+        parts = [(smooth(s["w"], s["g"], PRIOR_META), 0.5 if state.enemies else 1.0)]
         reasons = [f"{wr(s['w'], s['g']):.0%} overall WR in high elo ({s['g']} games)"]
         if s["lane"]:
-            lane_wr = (s["lane"]["wr"] * s["lane"]["g"] + prior / 2) / (s["lane"]["g"] + prior)
-            score += lane_wr * 3
-            weight += 3
+            parts.append((smooth(s["lane"]["w"], s["lane"]["g"], PRIOR_META), 3))
             reasons.append(f"vs {s['lane']['enemy']} in lane: {s['lane']['wr']:.0%} ({s['lane']['g']} games)")
         for v in s["vs"]:
-            score += (v["wr"] * v["g"] + prior / 2) / (v["g"] + prior)
-            weight += 1
-        good = [v for v in s["vs"] if v["g"] >= 10 and v["wr"] >= 0.55]
-        if good:
-            reasons.append("strong vs " + ", ".join(f"{v['enemy']} ({v['wr']:.0%})" for v in good))
+            parts.append((smooth(v["w"], v["g"], PRIOR_META), weights.get(v["id"], 1)))
+        # inimigos sem nenhum jogo contra este boneco contam como 50%
+        seen = {v["id"] for v in s["vs"]}
+        parts += [(0.5, w) for e, w in weights.items() if e not in seen]
+        reasons += matchup_reasons(s["vs"], weights)
+        score = sum(x * w for x, w in parts) / sum(w for _, w in parts)
         candidates.append({
             "champion_id": cid, "name": dd.champ_name(cid), "icon": dd.champ_icon(cid),
-            "score": round(score / weight, 4), "games": s["g"], "winrate": wr(s["w"], s["g"]),
+            "score": round(score, 4), "games": s["g"], "winrate": wr(s["w"], s["g"]),
             "reasons": reasons, "in_pool": False,
         })
 
@@ -515,6 +534,7 @@ def recommend_counters(state: ChampSelectState, db: DB, dd: DDragon, limit: int 
     return {
         "position": pos,
         "lane_opponent": {"id": lane_opp, "name": dd.champ_name(lane_opp), "icon": dd.champ_icon(lane_opp)} if lane_opp else None,
+        "enemies": [f"{dd.champ_name(e)} ({POS_LABEL.get(role_of.get(e), '?')})" for e in state.enemies],
         "candidates": candidates[:limit],
     }
 

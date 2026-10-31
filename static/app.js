@@ -133,8 +133,12 @@ function renderCounters(p) {
   $("#counters").innerHTML = p.candidates.length
     ? p.candidates.map((c) => pickItem(c, `score ${pct(c.score)}`, c.in_pool ? ` <span class="tag">in your pool</span>` : "")).join("")
     : `<li class="muted">Not enough high elo data for this role. Collect more games in "My data".</li>`;
-  if (!p.lane_opponent && p.candidates.length)
-    $("#counters").insertAdjacentHTML("afterbegin", `<p class="muted">Your lane opponent is not known yet: sorted by overall win rate and against the enemies already picked.</p>`);
+  if (!p.candidates.length) return;
+  const note = !p.enemies?.length
+    ? "No enemy picks yet: sorted by overall high elo win rate."
+    : `Against the enemies picked so far: ${p.enemies.join(", ")}.`
+      + (p.lane_opponent ? "" : " Your lane opponent is not known yet.");
+  $("#counters").insertAdjacentHTML("afterbegin", `<p class="muted">${esc(note)}</p>`);
 }
 
 document.querySelectorAll("#picks-card .subtabs button").forEach((b) =>
