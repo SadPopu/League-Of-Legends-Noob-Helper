@@ -434,7 +434,7 @@ async function toggleGame(id) {
 }
 
 // ---------------------------------------------------------------- mains
-const mainsState = { champs: [], selected: null, sort: "points", view: "all" };
+const mainsState = { champs: [], mine: [], mineError: "", filter: "mine", selected: null, sort: "points", view: "all" };
 
 function mainsTable(rep, compact) {
   if (!rep.mains.length)
@@ -467,20 +467,47 @@ function renderCsMains(rep) {
 }
 
 async function loadMainsList() {
-  const data = await (await fetch("/api/mains")).json();
+  const [data, mine] = await Promise.all([
+    fetch("/api/mains").then((r) => r.json()),
+    fetch("/api/my-mastery").then((r) => r.json()).catch(() => ({ ok: false, champions: [] })),
+  ]);
   mainsState.champs = data.champions;
+  mainsState.mine = mine.champions || [];
+  mainsState.mineError = mine.ok ? "" : mine.error || "";
   $("#mains-count").textContent = data.players ? `${data.players} Challenger/GM players with collected masteries` : "No masteries collected yet";
   renderMainsGrid();
 }
 
 function renderMainsGrid() {
   const q = $("#mains-search").value.trim().toLowerCase();
-  $("#mains-grid").innerHTML = mainsState.champs
+  const mineRank = new Map(mainsState.mine.map((c, i) => [c.id, i + 1]));
+  const byId = new Map(mainsState.champs.map((c) => [c.id, c]));
+  const showMine = mainsState.filter === "mine";
+  // "My top 10": por ordem de maestria; "All": todos, com os teus 10 marcados com ★
+  const list = showMine ? mainsState.mine.map((m) => ({ ...(byId.get(m.id) || m), points: m.points })) : mainsState.champs;
+  const tiles = list
     .filter((c) => !q || c.name.toLowerCase().includes(q))
-    .map((c) => `<button class="champ-tile ${c.id === mainsState.selected ? "active" : ""} ${c.mains ? "" : "empty-tile"}"
-        onclick="openMains(${c.id})" title="${esc(c.name)} · ${c.mains} known mains">
-        <img src="${c.icon}" alt=""><span>${esc(c.name)}</span></button>`).join("");
+    .map((c) => {
+      const rank = mineRank.get(c.id);
+      return `<button class="champ-tile ${c.id === mainsState.selected ? "active" : ""} ${c.mains ? "" : "empty-tile"} ${rank ? "mine" : ""}"
+        onclick="openMains(${c.id})" title="${esc(c.name)} · ${c.mains ?? 0} known mains${rank ? ` · your #${rank} by mastery` : ""}">
+        ${rank ? `<span class="mine-badge">★${rank}</span>` : ""}
+        <img src="${c.icon}" alt=""><span>${esc(c.name)}</span>
+        ${showMine ? `<small class="pts">${fmtK(c.points)} pts</small>` : ""}</button>`;
+    }).join("");
+  $("#mains-grid").classList.toggle("mine-grid", showMine);
+  $("#mains-grid").innerHTML = tiles || (showMine
+    ? `<p class="muted">${esc(mainsState.mineError || "Could not load your masteries.")}</p>`
+    : `<p class="muted">No champion found.</p>`);
 }
+
+document.querySelectorAll("#mains-filter button").forEach((b) =>
+  b.addEventListener("click", () => {
+    mainsState.filter = b.dataset.filter;
+    document.querySelectorAll("#mains-filter button").forEach((x) => x.classList.toggle("active", x === b));
+    renderMainsGrid();
+  })
+);
 
 async function openMains(id, quiet = false) {
   // quiet = recarregar o mesmo boneco (nomes/jogos novos chegaram) sem limpar o ecrã nem a vista escolhida

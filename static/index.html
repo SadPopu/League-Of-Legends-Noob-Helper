@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Noob Helper</title>
-  <link rel="stylesheet" href="/static/style.css?v=9">
+  <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 <header>
@@ -124,6 +124,10 @@
     </article>
     <div class="mains-layout">
       <div class="card mains-list">
+        <div class="subtabs" id="mains-filter">
+          <button data-filter="mine" class="active">★ My top 10</button>
+          <button data-filter="all">All champions</button>
+        </div>
         <input id="mains-search" placeholder="Search champion…">
         <div id="mains-grid"></div>
       </div>
@@ -192,6 +196,6 @@
   </section>
 </main>
 
-<script src="/static/app.js?v=9"></script>
+<script src="/static/app.js?v=10"></script>
 </body>
 </html>

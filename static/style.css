@@ -295,3 +295,12 @@ td.bad { color: var(--bad); }
 .clear-steps { font-size: 13px; margin: 6px 0; }
 .clear-steps b { display: inline-block; min-width: 18px; text-align: center; background: var(--gold); color: #10161f; border-radius: 50%; font-size: 11px; }
 .real-routes { margin: 8px 0; }
+
+/* mains: os meus 10 bonecos com mais maestria */
+#mains-filter { margin-bottom: 8px; }
+.champ-tile { position: relative; }
+.champ-tile.mine img { box-shadow: 0 0 0 2px var(--gold); }
+.mine-badge { position: absolute; top: 0; right: 2px; background: var(--gold); color: #10161f; font-size: 10px; font-weight: 700; border-radius: 6px; padding: 0 4px; line-height: 15px; }
+.champ-tile .pts { color: var(--gold); font-size: 10px; }
+.mine-grid { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)) !important; }
+.mine-grid .champ-tile img { width: 56px; height: 56px; }

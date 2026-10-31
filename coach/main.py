@@ -462,6 +462,30 @@ async def mains_crawl(params: MasteryParams):
     return {"ok": start_mastery_job(params.regions)}
 
 
+@app.get("/api/my-mastery")
+async def my_mastery(refresh: bool = False):
+    """Os teus 10 bonecos com mais pontos de maestria (guardados 6 h para não gastar pedidos)."""
+    await coach.resolve_me()
+    if not coach.me:
+        return {"ok": False, "error": "Unknown account: open the LoL client or set RIOT_ID in .env", "champions": []}
+    cached = json.loads(coach.db.kv_get("my_mastery") or "{}")
+    if refresh or cached.get("puuid") != coach.me["puuid"] or time.time() - cached.get("ts", 0) > 6 * 3600:
+        try:
+            masteries = await coach.riot.mastery_top(coach.me["puuid"], 10)
+        except RiotAPIError as e:
+            if not cached.get("list"):
+                return {"ok": False, "error": str(e), "champions": []}
+            masteries = cached["list"]
+        else:
+            cached = {"puuid": coach.me["puuid"], "ts": time.time(), "list": masteries}
+            coach.db.kv_set("my_mastery", json.dumps(cached))
+    dd = coach.dd
+    return {"ok": True, "updated": cached.get("ts"), "champions": [
+        {"id": m["championId"], "name": dd.champ_name(m["championId"]), "icon": dd.champ_icon(m["championId"]),
+         "points": m["championPoints"], "level": m.get("championLevel")}
+        for m in cached.get("list", [])]}
+
+
 @app.get("/api/mains")
 async def mains_list():
     counts = {r["champion_id"]: r for r in coach.db.query(
