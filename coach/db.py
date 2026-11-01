@@ -210,6 +210,16 @@ class DB:
             self.conn.execute("INSERT OR REPLACE INTO lp_history VALUES (?,?,?,?,?,?,?,?)",
                               (puuid, entry["queueType"], ts, *row))
 
+    def wipe_personal(self):
+        """Apaga tudo o que é da tua conta (jogos, histórico, relatórios, LP, maestrias).
+        Os jogos high elo e os mains ficam."""
+        with self.conn:
+            self.conn.execute("DELETE FROM participants WHERE source='me'")
+            self.conn.execute("DELETE FROM matches WHERE kind='me'")
+            for table in ("history", "postgame", "lp_history"):
+                self.conn.execute(f"DELETE FROM {table}")
+            self.conn.execute("DELETE FROM kv WHERE key IN ('my_mastery', 'last_job:sync', 'auto:sync')")
+
     def save_postgame(self, match_id: str, report: dict):
         with self.conn:
             self.conn.execute(

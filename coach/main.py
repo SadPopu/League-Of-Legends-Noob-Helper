@@ -75,10 +75,11 @@ class Coach:
 
     # ---------------------------------------------------------------- identidade
     async def resolve_me(self):
+        # A conta é a do RIOT_ID no .env; só sem ele é que se usa a que está aberta no cliente.
         # O PUUID do cliente (LCU) não serve para a API da Riot, que usa PUUIDs encriptados
         # por chave. Do cliente tiramos só o Riot ID e pedimos o PUUID à API.
         riot_id = config.RIOT_ID
-        if self.lcu.connected:
+        if not riot_id and self.lcu.connected:
             s = await self.lcu.get("/lol-summoner/v1/current-summoner")
             if s and s.get("gameName"):
                 riot_id = f"{s['gameName']}#{s.get('tagLine', '')}"
@@ -89,8 +90,24 @@ class Coach:
             acc = await self.riot.account_by_riot_id(name, tag)
             if acc:
                 self.me = {"puuid": acc["puuid"], "name": f"{acc['gameName']}#{acc['tagLine']}"}
+                self.check_owner()
         except RiotAPIError as e:
             log.warning("Could not fetch the account: %s", e)
+
+    def check_owner(self):
+        """Os teus dados (histórico, stats, LP) são de uma só conta. Se a conta mudou, apaga os da
+        anterior e vai buscar os da nova. Só conta como outra conta se mudarem o PUUID *e* o nome:
+        mudar só o nome (rename) ou só o PUUID (nova chave da API) é a mesma pessoa."""
+        owner = json.loads(self.db.kv_get("owner") or "{}")
+        me = self.me
+        if owner and owner["puuid"] != me["puuid"] and owner["name"].lower() != me["name"].lower():
+            log.info("Account changed from %s to %s: deleting the old account's data", owner["name"], me["name"])
+            self.db.wipe_personal()
+            self.profile = {}
+            self.db.kv_set("owner", json.dumps(me))
+            start_sync_job()
+        elif owner != me:
+            self.db.kv_set("owner", json.dumps(me))
 
     # ---------------------------------------------------------------- LCU
     async def on_lcu_status(self, connected: bool):
