@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS participants (
 );
 CREATE INDEX IF NOT EXISTS idx_part_champ ON participants(source, champion_id, position);
 CREATE INDEX IF NOT EXISTS idx_part_matchup ON participants(source, champion_id, opponent_id);
+-- índice "de cobertura" para o explorador de dados: evita ler as colunas JSON grandes de cada linha
+CREATE INDEX IF NOT EXISTS idx_part_explore ON participants(source, position, patch, champion_id,
+    win, kills, deaths, assists, cs, duration, damage_share, kp, match_id, opponent_id);
+-- para "boneco X contra cada inimigo": começa nos jogos do inimigo e salta para os adversários pelo match_id
+CREATE INDEX IF NOT EXISTS idx_part_bychamp ON participants(champion_id, source, position, match_id, win);
+CREATE INDEX IF NOT EXISTS idx_part_bymatch ON participants(match_id, win, source, position, champion_id);
 CREATE TABLE IF NOT EXISTS history (
     match_id TEXT PRIMARY KEY,
     grp TEXT,                        -- solo / flex / normal / aram / other
@@ -52,6 +58,13 @@ CREATE TABLE IF NOT EXISTS kv (
 CREATE TABLE IF NOT EXISTS accounts (
     puuid TEXT PRIMARY KEY,
     name TEXT
+);
+CREATE TABLE IF NOT EXISTS lp_history (   -- o teu rank sempre que a app o vê mudar
+    puuid TEXT NOT NULL,
+    queue TEXT NOT NULL,             -- RANKED_SOLO_5x5 / RANKED_FLEX_SR
+    ts INTEGER NOT NULL,             -- ms
+    tier TEXT, division TEXT, lp INTEGER, wins INTEGER, losses INTEGER,
+    PRIMARY KEY (puuid, queue, ts)
 );
 CREATE TABLE IF NOT EXISTS postgame (
     match_id TEXT PRIMARY KEY,
@@ -184,6 +197,18 @@ class DB:
     def history_detail(self, match_id: str) -> dict | None:
         r = self.conn.execute("SELECT data FROM history WHERE match_id=?", (match_id,)).fetchone()
         return json.loads(r["data"]) if r else None
+
+    def save_rank(self, puuid: str, entry: dict, ts: int):
+        """Guarda o rank de uma fila só se mudou desde o último registo (mesmo W/L = nada de novo)."""
+        last = self.conn.execute(
+            "SELECT tier, division, lp, wins, losses FROM lp_history WHERE puuid=? AND queue=? ORDER BY ts DESC LIMIT 1",
+            (puuid, entry["queueType"])).fetchone()
+        row = (entry["tier"], entry["rank"], entry["leaguePoints"], entry["wins"], entry["losses"])
+        if last and tuple(last) == row:
+            return
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO lp_history VALUES (?,?,?,?,?,?,?,?)",
+                              (puuid, entry["queueType"], ts, *row))
 
     def save_postgame(self, match_id: str, report: dict):
         with self.conn:

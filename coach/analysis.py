@@ -116,7 +116,7 @@ def recommend_picks(state: ChampSelectState, db: DB, dd: DDragon, limit: int = 5
         # sem histórico: usa os bonecos mais fortes na posição em high elo
         from_pool = False
         pool = db.query(
-            """SELECT champion_id, COUNT(*) games, SUM(win) wins FROM participants
+            """SELECT champion_id, COUNT(*) games, SUM(win) wins FROM participants INDEXED BY idx_part_explore
                WHERE source='meta' AND (? IS NULL OR position=?) GROUP BY champion_id
                HAVING games >= 20 ORDER BY games DESC LIMIT 40""", (pos, pos))
         for r in pool:
@@ -468,9 +468,12 @@ def enemy_matchups(db: DB, dd: DDragon, pos: str | None, lane_opp: int | None,
                 (enemy, pos, pos))
         else:
             rows = db.query(
-                """SELECT a.champion_id, COUNT(*) g, SUM(a.win) w FROM participants a
-                   JOIN participants b ON b.match_id = a.match_id AND b.win != a.win
-                   WHERE a.source='meta' AND b.champion_id=? AND (? IS NULL OR a.position=?)
+                # ordem forçada (CROSS JOIN): primeiro os jogos do inimigo, depois os adversários nesses jogos.
+                # Ao contrário o SQLite percorria todas as linhas high elo (vários segundos por inimigo).
+                """SELECT a.champion_id, COUNT(*) g, SUM(a.win) w
+                   FROM participants b INDEXED BY idx_part_bychamp
+                   CROSS JOIN participants a INDEXED BY idx_part_bymatch ON a.match_id = b.match_id AND a.win != b.win
+                   WHERE b.champion_id=? AND b.source='meta' AND a.source='meta' AND (? IS NULL OR a.position=?)
                    GROUP BY a.champion_id""", (enemy, pos, pos))
         for r in rows:
             entry = {"id": enemy, "enemy": dd.champ_name(enemy), "g": r["g"], "w": r["w"], "wr": wr(r["w"], r["g"])}
@@ -495,7 +498,7 @@ def recommend_counters(state: ChampSelectState, db: DB, dd: DDragon, limit: int 
     unavailable = state.unavailable()
 
     pool = db.query(
-        """SELECT champion_id, COUNT(*) g, SUM(win) w FROM participants
+        """SELECT champion_id, COUNT(*) g, SUM(win) w FROM participants INDEXED BY idx_part_explore
            WHERE source='meta' AND (? IS NULL OR position=?) GROUP BY champion_id HAVING g >= 15""", (pos, pos))
     if not pool:
         return {"position": pos, "lane_opponent": None, "candidates": []}

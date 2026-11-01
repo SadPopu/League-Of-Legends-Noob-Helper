@@ -81,6 +81,9 @@ class RiotAPI:
             f"{self.platform_url}/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}/top",
             {"count": count}) or []
 
+    async def summoner_by_puuid(self, puuid: str):
+        return await self._get(f"{self.platform_url}/lol/summoner/v4/summoners/by-puuid/{puuid}")
+
     async def league_entries_by_puuid(self, puuid: str):
         return await self._get(f"{self.platform_url}/lol/league/v4/entries/by-puuid/{puuid}") or []
 

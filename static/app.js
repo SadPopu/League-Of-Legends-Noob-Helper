@@ -1,22 +1,33 @@
 const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const pct = (x) => (x == null ? "–" : `${Math.round(x * 100)}%`);
 const num = (x, d = 1) => (x == null ? "–" : Number(x).toFixed(d));
 const icon = (c, cls = "ico") => (c && c.icon ? `<img class="${cls}" src="${c.icon}" alt="${esc(c.name)}" title="${esc(c.name)}">` : `<span class="${cls} blank"></span>`);
 const POS_PT = { TOP: "Top", JUNGLE: "Jungle", MIDDLE: "Mid", BOTTOM: "ADC", UTILITY: "Support", "": "—" };
+const getJSON = (url, opts) => fetch(url, opts).then((r) => r.json());
+const fmtK = (x) => (x == null ? "–" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : `${Math.round(x)}`);
+const fmtN = (x) => (x == null ? "–" : Number(x).toLocaleString("en-GB"));
+const mins = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+const ago = (ts) => {
+  if (!ts) return "never";
+  const h = (Date.now() - ts) / 3600000;
+  return h < 1 / 60 ? "just now" : h < 1 ? `${Math.round(h * 60)} min ago` : h < 24 ? `${Math.round(h)} h ago`
+    : h < 24 * 30 ? `${Math.round(h / 24)} days ago` : new Date(ts).toLocaleDateString("en-GB");
+};
+const isActive = (tab) => document.body.dataset.tab === tab;
 
-// ---------------------------------------------------------------- tabs
-document.querySelectorAll("nav button").forEach((b) =>
-  b.addEventListener("click", () => {
-    document.querySelectorAll("nav button, .tab").forEach((e) => e.classList.remove("active"));
-    b.classList.add("active");
-    $(`#tab-${b.dataset.tab}`).classList.add("active");
-    if (b.dataset.tab === "data") { loadStats(); loadAuto(); }
-    if (b.dataset.tab === "pg") loadPostgames();
-    if (b.dataset.tab === "hist") loadHistory(true);
-    if (b.dataset.tab === "mains") loadMainsList();
-  })
-);
+// ---------------------------------------------------------------- abas
+function showTab(tab) {
+  document.body.dataset.tab = tab;
+  $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $$(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${tab}`));
+  if (tab === "profile") { loadProfile(); loadHistory(true); }
+  if (tab === "mains") loadMainsList();
+  if (tab === "data") loadData();
+  if (tab !== "cs") $("#sim-panel").hidden = true;
+}
+$$("nav button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
 // ---------------------------------------------------------------- websocket
 function connect() {
@@ -35,43 +46,72 @@ function handle(msg) {
     case "build": return renderBuild(msg);
     case "mains": return renderCsMains(msg);
     case "mains_updated":
-      if ($("#tab-mains").classList.contains("active") && mainsState.selected === msg.champion) openMains(msg.champion, true);
+      if (isActive("mains") && mainsState.selected === msg.champion) openMains(msg.champion, true);
       return;
     case "ingame":
       $("#cs-ingame").hidden = false;
       return;
-    case "champselect_end":
-      $("#cs-live").hidden = true; $("#cs-idle").hidden = false; $("#build-card").hidden = true; $("#cs-ingame").hidden = true;
-      $("#cs-mains").innerHTML = ""; csWasLocked = false; return;
+    case "champselect_end": return resetChampSelect();
     case "history_updated":
-      if ($("#tab-hist").classList.contains("active")) loadHistory(true);
+      if (isActive("profile")) { loadProfile(); loadHistory(true); }
       return;
-    case "postgame_pending": $("#pg-msg").textContent = "Game over: waiting for Riot to publish the match data…"; return;
     case "postgame":
-      $("#pg-msg").textContent = "";
-      document.querySelector('nav button[data-tab="pg"]').click();
+      // jogo acabado e analisado: abre-o no histórico
+      hist.openAfterLoad = msg.report?.match_id;
+      showTab("profile");
       return;
   }
 }
 
+// ---------------------------------------------------------------- estado e recolhas (jobs)
+const JOB_UNITS = { sync: "new games", meta: "new games", mastery: "players checked", mains_games: "new games" };
+const STEP_TXT = {
+  players: "finding top players", games: "downloading games", "new games": "new games", "old game timelines": "adding details to older games",
+  masteries: "checking players", "listing games": "looking for new games",
+};
+const stepText = (s) => STEP_TXT[s] || s.replace(/^main (\d+)\/(\d+) games$/, "player $1 of $2");
 const lastJobRunning = {};
+let JOBS = {};
+
+function jobView(name) {
+  const j = JOBS[name];
+  if (!j) return "";
+  if (j.running) {
+    const parts = Object.entries(j.parts || {});
+    const done = parts.reduce((s, [, p]) => s + p.done, 0), total = parts.reduce((s, [, p]) => s + p.total, 0);
+    const lines = parts.map(([k, p]) => `${k !== "_" ? `${k}: ` : ""}${stepText(p.step)} ${p.done}/${p.total}`);
+    return `<div class="bar ${total ? "" : "indet"}"><span style="width:${total ? Math.round((100 * done) / total) : 0}%"></span></div>
+      <small class="muted">${esc(lines.join(" · ") || "Starting…")}</small>`;
+  }
+  if (j.stopped) return `<small class="muted">Stopped · ${fmtN(j.count || 0)} ${JOB_UNITS[name] || ""} kept</small>`;
+  if (j.ok === false) return `<small class="bad">Something went wrong: ${esc((j.result || "").replace(/^Error: /, ""))}</small>`;
+  return `<small class="good">✓ Done${j.count != null ? ` · ${fmtN(j.count)} ${JOB_UNITS[name] || ""}` : ""}</small>`;
+}
+function renderJobs() {
+  $$("[data-jobview]").forEach((el) => (el.innerHTML = jobView(el.dataset.jobview)));
+  $$("[data-job]").forEach((b) => (b.disabled = !!JOBS[b.dataset.job]?.running));
+  const stop = $("#collect-stop");
+  if (stop) stop.hidden = !JOBS.meta?.running;
+}
+
 function renderStatus(s) {
   const lcu = $("#st-lcu");
-  lcu.textContent = s.lcu ? "Client connected" : "Client disconnected";
+  lcu.querySelector("span").textContent = s.lcu ? "Client connected" : "Client offline";
   lcu.className = "pill " + (s.lcu ? "ok" : "off");
-  $("#st-me").textContent = s.me?.name || (s.riot_key ? "Unknown account" : "RIOT_API_KEY missing");
-  $("#st-phase").textContent = s.phase && s.phase !== "None" ? s.phase : "";
+  const phase = { ChampSelect: "Champ select", InProgress: "In game", Lobby: "Lobby", Matchmaking: "In queue",
+    ReadyCheck: "Match found", EndOfGame: "Post-game", PreEndOfGame: "Post-game", GameStart: "Loading" }[s.phase];
+  $("#st-phase").textContent = phase || "";
   if (s.version) DD_VERSION = s.version;
-  for (const name of ["sync", "meta", "mastery", "mains_games"]) {
-    const j = s.jobs?.[name];
-    const label = $(`#job-${name}`);
-    if (label) label.textContent = j ? (j.running ? `Running… ${j.progress}` : j.result) : "";
-    document.querySelectorAll(`[data-job="${name}"]`).forEach((b) => (b.disabled = !!j?.running));
-    // quando um job acaba, atualiza o que estiver aberto
+  if (!s.riot_key) $("#st-phase").textContent = "RIOT_API_KEY missing in .env";
+  JOBS = s.jobs || {};
+  renderJobs();
+  for (const name of Object.keys(JOB_UNITS)) {
+    const j = JOBS[name];
+    // quando uma recolha acaba, atualiza o que estiver aberto
     if (j && !j.running && lastJobRunning[name]) {
-      if ($("#tab-data").classList.contains("active")) loadStats();
-      if ($("#tab-hist").classList.contains("active")) loadHistory(true);
-      if ($("#tab-mains").classList.contains("active")) {
+      if (isActive("data")) loadData();
+      if (isActive("profile")) { loadProfile(); loadHistory(true); if (!$("#prof-champs").hidden) loadStats(); }
+      if (isActive("mains")) {
         loadMainsList();
         if (mainsState.selected) openMains(mainsState.selected, true);
       }
@@ -82,77 +122,130 @@ function renderStatus(s) {
 
 // ---------------------------------------------------------------- champ select
 let csWasLocked = false;
+let buildChamp = null; // boneco da build no ecrã
+let csEnemyRole = {}; // nome do boneco inimigo -> posição provável
+let csLast = null;
+
+function slotHtml({ champ, label, name, me, hover }) {
+  const bg = champ?.icon ? `style="background-image:url('${champ.icon}')"` : "";
+  return `<li class="slot ${champ ? "" : "empty"} ${me ? "me" : ""} ${hover ? "hover" : ""}">
+    <div class="portrait" ${bg}></div>
+    <div class="who"><small>${esc(label)}</small><strong>${esc(name)}</strong>${hover ? `<em>hovering</em>` : ""}</div>
+  </li>`;
+}
+const banRow = (bans) => Array.from({ length: 5 }, (_, i) => bans[i]
+  ? `<span class="ban" style="background-image:url('${bans[i].icon}')" title="${esc(bans[i].name)}"></span>`
+  : `<span class="ban none"></span>`).join("");
+
+function renderSides(cs) {
+  const allies = cs ? cs.allies : [];
+  $("#allies").innerHTML = Array.from({ length: 5 }, (_, i) => {
+    const a = allies[i];
+    if (!a) return slotHtml({ label: "", name: "" });
+    return slotHtml({
+      champ: a.champion, me: a.me, hover: a.champion && !a.locked,
+      label: `${POS_PT[a.position] ?? a.position}${a.me ? " · You" : ""}`,
+      name: a.champion?.name || (a.me ? "Your pick" : "Picking…"),
+    });
+  }).join("");
+  const enemies = cs ? cs.enemies : [];
+  $("#enemies").innerHTML = Array.from({ length: 5 }, (_, i) => {
+    const c = enemies[i];
+    return c ? slotHtml({ champ: c, label: csEnemyRole[c.name] ? `${POS_PT[csEnemyRole[c.name]]} (likely)` : "", name: c.name })
+      : slotHtml({ label: "", name: "" });
+  }).join("");
+  // sessões antigas sem bans por equipa: mostra todos do lado aliado
+  const allyBans = cs ? (cs.ally_bans || cs.bans || []) : [];
+  $("#ally-bans").innerHTML = banRow(allyBans);
+  $("#enemy-bans").innerHTML = banRow(cs ? cs.enemy_bans || [] : []);
+}
+
 function renderChampSelect(cs) {
+  csLast = cs;
   $("#cs-idle").hidden = true;
   $("#cs-ingame").hidden = true;
   $("#cs-live").hidden = false;
-  $("#allies").innerHTML = cs.allies.map((a) => `
-    <li class="${a.me ? "me" : ""}">
-      ${icon(a.champion)}
-      <span class="pos">${POS_PT[a.position] ?? a.position}</span>
-      <span>${esc(a.champion?.name || (a.me ? "You" : "…"))}${a.locked ? "" : a.champion ? " <em>(hover)</em>" : ""}</span>
-    </li>`).join("");
-  $("#enemies").innerHTML = cs.enemies.length
-    ? cs.enemies.map((c) => `<li>${icon(c)}<span>${esc(c.name)}</span></li>`).join("")
-    : `<li class="muted">No picks yet</li>`;
-  $("#bans").innerHTML = cs.bans.map((c) => icon(c, "ico small")).join("") || `<span class="muted">—</span>`;
-  if (cs.locked && !csWasLocked) document.querySelector('#picks-card .subtabs [data-sub="mains"]').click();
+  renderSides(cs);
+  const me = cs.allies.find((a) => a.me);
+  const hasChamp = !!me?.champion;
+  $$('#center-tabs [data-sub="build"], #center-tabs [data-sub="mains"]').forEach((b) => (b.disabled = !hasChamp));
+  // trocaste de boneco: mostra "a carregar" até chegar a build/mains do novo
+  if (hasChamp && me.champion.id !== buildChamp) {
+    buildChamp = me.champion.id;
+    $("#build-title").textContent = "";
+    $("#build").innerHTML = `<div class="loading">Loading the build for ${esc(me.champion.name)}…</div>`;
+    $("#cs-mains").innerHTML = `<div class="loading">Loading ${esc(me.champion.name)} mains…</div>`;
+  }
+  if (cs.locked && !csWasLocked) setCenter("build");
   csWasLocked = cs.locked;
 }
+
+function resetChampSelect() {
+  csLast = null; csEnemyRole = {}; csWasLocked = false; buildChamp = null;
+  $("#cs-live").hidden = true; $("#cs-idle").hidden = false; $("#cs-ingame").hidden = true;
+  $("#cs-mains").innerHTML = ""; $("#build").innerHTML = "";
+  setCenter("mine");
+  renderSides(null);
+}
+
+const CENTER_TITLES = { mine: "Pick suggestions", counters: "Counters", build: "Build & runes", mains: "One-trick mains" };
+function setCenter(sub) {
+  $$("#center-tabs button").forEach((x) => x.classList.toggle("active", x.dataset.sub === sub));
+  $("#picks").hidden = sub !== "mine";
+  $("#counters").hidden = sub !== "counters";
+  $("#build-pane").hidden = sub !== "build";
+  $("#cs-mains").hidden = sub !== "mains";
+  $("#picks-warning").hidden = sub !== "mine" || !$("#picks-warning").textContent;
+  $("#center-title").textContent = CENTER_TITLES[sub];
+}
+$$("#center-tabs button").forEach((b) => b.addEventListener("click", () => setCenter(b.dataset.sub)));
 
 function renderPicks(p) {
   $("#picks-pos").textContent = [
     p.position ? POS_PT[p.position] : "",
     p.lane_opponent ? `vs ${p.lane_opponent.name} (likely)` : "",
   ].filter(Boolean).join(" · ");
-  const roles = Object.entries(p.enemy_roles || {}).map(([pos, n]) => `${POS_PT[pos]}: ${n}`).join(", ");
-  $("#enemy-roles").textContent = roles ? `(${roles})` : "";
-  $("#picks-warning").hidden = !p.warning;
+  csEnemyRole = Object.fromEntries(Object.entries(p.enemy_roles || {}).map(([pos, n]) => [n, pos]));
+  if (csLast) renderSides(csLast);
   $("#picks-warning").textContent = p.warning || "";
+  $("#picks-warning").hidden = !p.warning || $("#picks").hidden;
   $("#picks").innerHTML = p.candidates.length
-    ? p.candidates.map((c) => pickItem(c, `fit ${pct(c.score)} · ${c.games} games · ${pct(c.winrate)} WR${c.kda != null ? ` · KDA ${num(c.kda)}` : ""}`,
-        c.comfort === false ? ` <span class="tag few">few games</span>` : "")).join("")
-    : `<li class="muted">No data yet: sync your games and collect high elo data in the "My data" tab.</li>`;
+    ? p.candidates.map((c, i) => pickItem(c, i, `${c.games} games · ${pct(c.winrate)} WR${c.kda != null ? ` · KDA ${num(c.kda)}` : ""}`,
+        c.comfort === false ? ` <span class="tag few">few games</span>` : "", "fit")).join("")
+    : `<li class="muted">No data yet: check for new games in the Profile tab and get high elo games in the Data tab.</li>`;
   if (!p.from_pool && p.candidates.length)
     $("#picks").insertAdjacentHTML("afterbegin", `<p class="muted">You have no games in this role yet: suggestions are based on the high elo meta.</p>`);
 }
 
-function pickItem(c, sub, tag = "") {
+function pickItem(c, i, sub, tag = "", scoreLabel = "score") {
   return `
     <li>
+      <span class="rank-n">${i + 1}</span>
       ${icon({ icon: c.icon, name: c.name }, "ico big")}
       <div>
         <strong>${esc(c.name)}</strong>${tag}
-        <span class="muted">${sub}</span>
+        <span class="sub">${sub}</span>
         <ul class="reasons">${c.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
       </div>
+      <div class="fit"><b>${pct(c.score)}</b><small>${scoreLabel}</small></div>
     </li>`;
 }
 
 function renderCounters(p) {
   $("#counters").innerHTML = p.candidates.length
-    ? p.candidates.map((c) => pickItem(c, `score ${pct(c.score)}`, c.in_pool ? ` <span class="tag">in your pool</span>` : "")).join("")
-    : `<li class="muted">Not enough high elo data for this role. Collect more games in "My data".</li>`;
+    ? p.candidates.map((c, i) => pickItem(c, i, `${fmtN(c.games)} high elo games · ${pct(c.winrate)} WR`,
+        c.in_pool ? ` <span class="tag">in your pool</span>` : "")).join("")
+    : `<li class="muted">Not enough high elo data for this role yet. Get more games in the Data tab.</li>`;
   if (!p.candidates.length) return;
   const note = !p.enemies?.length
     ? "No enemy picks yet: sorted by overall high elo win rate."
-    : `Against the enemies picked so far: ${p.enemies.join(", ")}.`
-      + (p.lane_opponent ? "" : " Your lane opponent is not known yet.");
+    : `Against the enemies picked so far: ${p.enemies.join(", ")}.` + (p.lane_opponent ? "" : " Your lane opponent is not known yet.");
   $("#counters").insertAdjacentHTML("afterbegin", `<p class="muted">${esc(note)}</p>`);
 }
 
-document.querySelectorAll("#picks-card .subtabs button").forEach((b) =>
-  b.addEventListener("click", () => {
-    document.querySelectorAll("#picks-card .subtabs button").forEach((x) => x.classList.toggle("active", x === b));
-    $("#picks").hidden = b.dataset.sub !== "mine";
-    $("#counters").hidden = b.dataset.sub !== "counters";
-    $("#cs-mains").hidden = b.dataset.sub !== "mains";
-  })
-);
-
 // ---------------------------------------------------------------- árvore de runas
 let RUNES = null;
-fetch("/api/runes").then((r) => r.json()).then((d) => (RUNES = d));
+getJSON("/api/runes").then((d) => (RUNES = d));
 
 function runeTree(r) {
   if (!RUNES) return "";
@@ -195,7 +288,7 @@ function buildDetailHtml(b) {
         &nbsp; Max order: ${p.priority.split(" > ").map((s) => `<span class="key">${s}</span>`).join(" › ")}</p>`);
     }
     if (t.start_items || t.item_path) {
-      parts.push(`<h3>Item order <small>${esc(t.scope)} · ${t.sample} games with timeline</small></h3>`);
+      parts.push(`<h3>Item order <small>${esc(t.scope)} · ${t.sample} detailed games</small></h3>`);
       if (t.start_items) parts.push(`<div class="build-path"><span class="muted">Start</span>${t.start_items.items.map((it) => icon(it)).join("")}</div>`);
       if (t.item_path) parts.push(`<div class="build-path">${t.item_path.items.map((it) => `
           <div class="step">${icon(it)}<small>${esc(it.name)}<br>~${it.minute} min</small></div>`).join(`<span class="arrow">›</span>`)}
@@ -220,8 +313,9 @@ function buildDetailHtml(b) {
 }
 
 function renderBuild(b) {
-  $("#build-card").hidden = false;
-  $("#build-title").textContent = `${b.champion.name}${b.locked ? "" : " (hover)"} · ${b.scope} · ${b.sample} high elo games`;
+  buildChamp = b.champion.id;
+  $$('#center-tabs [data-sub="build"], #center-tabs [data-sub="mains"]').forEach((x) => (x.disabled = false));
+  $("#build-title").textContent = `${b.champion.name}${b.locked ? "" : " (hovering)"} · ${b.scope} · based on ${fmtN(b.sample)} high elo games`;
   const parts = [];
   if (b.matchup) {
     const m = b.matchup;
@@ -230,9 +324,7 @@ function renderBuild(b) {
       High elo: ${m.meta_games ? `${pct(m.meta_winrate)} WR (${m.meta_games} games)` : "no data"} ·
       You: ${m.my_games ? `${pct(m.my_winrate)} WR (${m.my_games} games)` : "never played"}</div></div>`);
   }
-  if (!b.sample) {
-    parts.push(`<p class="muted">No high elo games with this champion in the database yet. Collect high elo data in the "My data" tab.</p>`);
-  }
+  if (!b.sample) parts.push(`<p class="muted">No high elo games with this champion yet. Get more games in the Data tab.</p>`);
   parts.push(buildDetailHtml(b));
   if (b.core_items.length) {
     parts.push(`<h3>Most used items</h3><div class="items">${
@@ -241,16 +333,17 @@ function renderBuild(b) {
         <small>${pct(it.pick_rate)} of games${it.winrate != null ? ` · ${pct(it.winrate)} WR` : ""}</small></div>`).join("")
     }</div>`);
   }
-  if (b.situational.length) {
+  if (b.situational.length)
     parts.push(`<h3>Situational (vs this team)</h3><ul class="reasons">${b.situational.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>`);
-  }
   $("#build").innerHTML = parts.join("");
 }
 
 // ---------------------------------------------------------------- simulador
-fetch("/api/champions").then((r) => r.json()).then((names) => {
+getJSON("/api/champions").then((names) => {
   $("#champ-list").innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
 });
+$("#sim-fab").addEventListener("click", () => ($("#sim-panel").hidden = !$("#sim-panel").hidden));
+$("#sim-close").addEventListener("click", () => ($("#sim-panel").hidden = true));
 const splitList = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
 $("#sim-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -265,32 +358,137 @@ $("#sim-form").addEventListener("submit", async (e) => {
     }),
     enemies: splitList(f.get("enemies")),
     bans: splitList(f.get("bans")),
+    enemy_bans: splitList(f.get("enemy_bans")),
   };
   await fetch("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 });
 $("#sim-end").addEventListener("click", () => fetch("/api/simulate/end", { method: "POST" }));
 
-// ---------------------------------------------------------------- pós-jogo
-async function loadPostgames() {
-  const list = await (await fetch("/api/postgame")).json();
-  PG_REPORTS = list;
-  renderPgCats();
-  $("#pg-list").innerHTML = list.length ? list.map(renderReport).join("") : `<p class="muted">No analysed games yet.</p>`;
+// ---------------------------------------------------------------- perfil
+const TIER_NAME = (t) => t.charAt(0) + t.slice(1).toLowerCase();
+const APEX = ["MASTER", "GRANDMASTER", "CHALLENGER"];
+const emblem = (tier) => `https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-shared-components/global/default/${tier.toLowerCase()}.png`;
+const rankName = (r) => `${TIER_NAME(r.tier)}${APEX.includes(r.tier) ? "" : ` ${r.division}`}`;
+
+async function loadProfile() {
+  const p = await getJSON("/api/profile").catch(() => ({ ok: false, error: "Could not reach the app." }));
+  if (!p.ok) {
+    $("#profile-card").innerHTML = `<p class="muted">${esc(p.error)}</p>`;
+    return;
+  }
+  const [name, tag] = p.name.split("#");
+  const rankBox = (label, r) => `
+    <div class="rank-box">
+      ${r ? `<img src="${emblem(r.tier)}" alt="" onerror="this.style.visibility='hidden'">` : ""}
+      <div><small>${label}</small>
+        ${r ? `<strong>${rankName(r)} · ${r.lp} LP</strong>
+          <span class="wl">${r.wins}W ${r.losses}L · <span class="${r.winrate >= 0.5 ? "good" : "bad"}">${pct(r.winrate)}</span></span>`
+          : `<strong class="muted">Unranked</strong>`}
+      </div>
+    </div>`;
+  $("#profile-card").innerHTML = `
+    <div class="profile-id">
+      <div class="avatar">${p.icon ? `<img src="${p.icon}" alt="">` : ""}${p.level ? `<span>${p.level}</span>` : ""}</div>
+      <div><h2>${esc(name)} <small class="muted">#${esc(tag || "")}</small></h2></div>
+    </div>
+    <div class="ranks">${rankBox("Ranked Solo/Duo", p.ranks.solo)}${rankBox("Ranked Flex", p.ranks.flex)}</div>`;
+  PROFILE = p;
+  loadLp();
+}
+let PROFILE = null;
+
+// ---------------------------------------------------------------- gráfico de LP
+const lp = { queue: "solo", days: 7 };
+const ROMAN = ["IV", "III", "II", "I"];
+const TIERS = ["IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD", "DIAMOND"];
+function lpLabel(v, withLp = true) {
+  if (v >= 2800) return withLp ? `Master+ ${Math.round(v - 2800)} LP` : `${Math.round(v - 2800)} LP`;
+  const t = Math.max(0, Math.floor(v / 400)), d = Math.floor((v % 400) / 100);
+  return `${TIER_NAME(TIERS[t] || "IRON")} ${ROMAN[d]}${withLp ? ` ${Math.round(v % 100)} LP` : ""}`;
 }
 
-$("#pg-analyse").addEventListener("click", async () => {
-  $("#pg-msg").textContent = "Analysing…";
-  const res = await (await fetch("/api/postgame/analyse", { method: "POST" })).json();
-  $("#pg-msg").textContent = res.ok ? "" : res.error || "Could not analyse the game.";
-  loadPostgames();
-});
+document.querySelectorAll("#lp-queue button").forEach((b) => b.addEventListener("click", () => {
+  lp.queue = b.dataset.q;
+  $$("#lp-queue button").forEach((x) => x.classList.toggle("active", x === b));
+  loadLp();
+}));
+document.querySelectorAll("#lp-range button").forEach((b) => b.addEventListener("click", () => {
+  lp.days = +b.dataset.d;
+  $$("#lp-range button").forEach((x) => x.classList.toggle("active", x === b));
+  loadLp();
+}));
 
-// ---------------------------------------------------------------- dados
+async function loadLp() {
+  const data = await getJSON(`/api/lp?queue=${lp.queue}`);
+  const all = data.points || [];
+  const el = $("#lp-chart");
+  if (!all.length) {
+    el.innerHTML = `<div class="empty">${PROFILE?.ranks?.[lp.queue] ? "No rank history yet." : "Unranked in this queue this season."}</div>`;
+    $("#lp-note").textContent = "";
+    return;
+  }
+  const now = Date.now();
+  const since = lp.days ? now - lp.days * 86400000 : all[0].t;
+  // o valor no início do período = último ponto antes dele
+  const before = [...all].reverse().find((p) => p.t < since);
+  const pts = [...(before ? [{ ...before, t: since, edge: true }] : []), ...all.filter((p) => p.t >= since)];
+  pts.push({ ...pts[pts.length - 1], t: now, edge: true });
+
+  const W = 700, H = 200, padL = 78, padR = 10, padT = 10, padB = 22;
+  const vs = pts.map((p) => p.v);
+  let lo = Math.min(...vs), hi = Math.max(...vs);
+  if (hi - lo < 60) { const m = (hi + lo) / 2; lo = m - 30; hi = m + 30; }
+  lo -= 10; hi += 10;
+  const x = (t) => padL + ((t - since) / Math.max(now - since, 1)) * (W - padL - padR);
+  const y = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+  // linhas de divisão (cada 100 LP) com o nome; se forem muitas, só os tiers
+  const step = hi - lo > 900 ? 400 : 100;
+  const grid = [];
+  for (let g = Math.ceil(lo / step) * step; g <= hi; g += step)
+    grid.push(`<line x1="${padL}" x2="${W - padR}" y1="${y(g)}" y2="${y(g)}"/><text x="${padL - 6}" y="${y(g) + 3}" text-anchor="end">${lpLabel(g, false)}</text>`);
+  const days = lp.days || Math.ceil((now - since) / 86400000);
+  for (let i = 0; i <= 4; i++) {
+    const t = since + ((now - since) * i) / 4;
+    grid.push(`<text x="${x(t)}" y="${H - 4}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${i === 4 ? "now" : new Date(t).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}</text>`);
+  }
+  // segmentos: tracejado onde o valor é estimado
+  const segs = [];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    segs.push(`<line class="line ${a.exact && b.exact ? "" : "est"}" x1="${x(a.t)}" y1="${y(a.v)}" x2="${x(b.t)}" y2="${y(b.v)}"/>`);
+  }
+  const area = `M${x(pts[0].t)},${H - padB} ` + pts.map((p) => `L${x(p.t)},${y(p.v)}`).join(" ") + ` L${x(now)},${H - padB} Z`;
+  const dots = pts.filter((p) => !p.edge && (p.win != null || p.exact)).map((p) =>
+    `<circle class="pt ${p.win == null ? "x" : p.win ? "w" : "l"}" cx="${x(p.t)}" cy="${y(p.v)}" r="${p.win == null ? 3.5 : 3}">
+      <title>${new Date(p.t).toLocaleString("en-GB")} · ${p.win == null ? "rank recorded" : `${p.win ? "Win" : "Loss"} · ${esc(p.champion || "")}`} · ${lpLabel(p.v)}${p.exact ? "" : " (estimated)"}</title></circle>`).join("");
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <defs><linearGradient id="lpfill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#f0c96a" stop-opacity=".22"/><stop offset="1" stop-color="#f0c96a" stop-opacity="0"/></linearGradient></defs>
+      <g class="grid">${grid.join("")}</g><path class="area" d="${area}"/>${segs.join("")}${dots}
+    </svg>`;
+  const games = pts.filter((p) => p.win != null && !p.edge);
+  const w = games.filter((p) => p.win).length;
+  const diff = Math.round(pts[pts.length - 1].v - pts[0].v);
+  el.insertAdjacentHTML("beforeend", `<div class="lp-sum">
+    <span><b class="${diff >= 0 ? "good" : "bad"}">${diff >= 0 ? "+" : ""}${diff} LP</b> <span class="muted">in the last ${lp.days ? `${days} days` : "season"}</span></span>
+    <span><b>${w}W ${games.length - w}L</b> <span class="muted">${games.length ? pct(w / games.length) : ""}</span></span>
+    <span class="muted">Now: ${lpLabel(pts[pts.length - 1].v)}</span></div>`);
+  const estimated = pts.some((p) => !p.exact && !p.edge);
+  $("#lp-note").textContent = estimated
+    ? `Riot doesn't share LP history, so dashed parts are estimated from your wins and losses (≈ +${data.gain} / ${data.loss} LP per game). The line becomes exact as the app records your rank after each game.`
+    : "";
+}
+
+// ---------------------------------------------------------------- perfil: sub-abas e estatísticas por boneco
+$$("#profile-sub button").forEach((b) => b.addEventListener("click", () => {
+  $$("#profile-sub button").forEach((x) => x.classList.toggle("active", x === b));
+  $("#prof-games").hidden = b.dataset.view !== "games";
+  $("#prof-champs").hidden = b.dataset.view !== "champs";
+  if (b.dataset.view === "champs") loadStats();
+}));
+
 async function loadStats() {
   const pos = $("#stats-pos").value;
-  const data = await (await fetch(`/api/stats${pos ? `?position=${pos}` : ""}`)).json();
-  const regions = Object.entries(data.meta_regions || {}).map(([r, n]) => `${r} ${n}`).join(", ");
-  $("#meta-count").textContent = `· ${data.meta_games} high elo games in the database${regions ? ` (${regions})` : ""}, ${data.meta_timelines} with timeline`;
+  const data = await getJSON(`/api/stats${pos ? `?position=${pos}` : ""}`);
   $("#stats tbody").innerHTML = data.champions.map((c) => `
     <tr>
       <td>${icon(c, "ico small")} ${esc(c.name)}</td>
@@ -298,44 +496,25 @@ async function loadStats() {
       <td class="${c.winrate >= 0.55 ? "good" : c.winrate < 0.45 ? "bad" : ""}">${pct(c.winrate)}</td>
       <td>${num(c.kda, 2)}</td><td>${num(c.cspm)}</td><td>${num(c.vspm, 2)}</td>
       <td>${pct(c.kp)}</td><td>${pct(c.dmg_share)}</td>
-    </tr>`).join("") || `<tr><td colspan="8" class="muted">No games yet. Click "Sync season".</td></tr>`;
+    </tr>`).join("") || `<tr><td colspan="8" class="muted">No ranked games yet. Click "Check for new games".</td></tr>`;
 }
 $("#stats-pos").addEventListener("change", loadStats);
 
 $("#sync").addEventListener("click", async () => {
-  const res = await (await fetch("/api/sync", { method: "POST" })).json();
-  if (!res.ok && res.error) $("#job-sync").textContent = res.error;
+  const res = await getJSON("/api/sync", { method: "POST" });
+  if (!res.ok && res.error) $('[data-jobview="sync"]').innerHTML = `<small class="bad">${esc(res.error)}</small>`;
 });
-$("#crawl").addEventListener("click", () =>
-  fetch("/api/meta/crawl", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      regions: [...document.querySelectorAll(".crawl-region:checked")].map((c) => c.value),
-      players: +$("#crawl-players").value,
-      per_player: +$("#crawl-per").value,
-      include_master: $("#crawl-master").checked,
-      timelines: $("#crawl-tl").checked,
-      backfill: +$("#crawl-backfill").value,
-    }),
-  })
-);
 
 // ---------------------------------------------------------------- histórico
-const hist = { group: "all", offset: 0 };
-const fmtK = (x) => (x == null ? "–" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : `${Math.round(x)}`);
-const mins = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-const ago = (ts) => {
-  const h = (Date.now() - ts) / 3600000;
-  return h < 1 ? "just now" : h < 24 ? `${Math.round(h)} h ago` : h < 24 * 30 ? `${Math.round(h / 24)} days ago` : new Date(ts).toLocaleDateString("en-GB");
-};
+const hist = { group: "all", offset: 0, openAfterLoad: null, seq: 0 };
 const scoreTag = (p) => (p.score == null ? "" :
   `<span class="score-tag ${p.badge ? p.badge.toLowerCase() : ""}">${p.badge ? `${p.badge} ` : ""}${num(p.score)}</span>`);
 const itemsRow = (items, cls = "ico small") => items.map((it) => (it ? icon(it, cls) : `<span class="${cls} blank"></span>`)).join("");
+const GAMES = {};
 
-document.querySelectorAll("#hist-groups button").forEach((b) =>
+$$("#hist-groups button").forEach((b) =>
   b.addEventListener("click", () => {
-    document.querySelectorAll("#hist-groups button").forEach((x) => x.classList.toggle("active", x === b));
+    $$("#hist-groups button").forEach((x) => x.classList.toggle("active", x === b));
     hist.group = b.dataset.group;
     loadHistory(true);
   })
@@ -344,9 +523,11 @@ $("#hist-more").addEventListener("click", () => loadHistory(false));
 
 async function loadHistory(reset) {
   if (reset) hist.offset = 0;
-  const data = await (await fetch(`/api/history?group=${hist.group}&offset=${hist.offset}&limit=20`)).json();
+  const seq = ++hist.seq;
+  const data = await getJSON(`/api/history?group=${hist.group}&offset=${hist.offset}&limit=20`);
+  if (seq !== hist.seq) return; // entretanto pediu-se outra página/filtro
   const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
-  document.querySelectorAll("#hist-groups button").forEach((b) => {
+  $$("#hist-groups button").forEach((b) => {
     const n = b.dataset.group === "all" ? total : data.counts[b.dataset.group] || 0;
     b.querySelector("small").textContent = n ? `(${n})` : "";
   });
@@ -354,10 +535,16 @@ async function loadHistory(reset) {
     renderHistSummary(data);
     $("#hist-list").innerHTML = "";
   }
+  data.games.forEach((g) => (GAMES[g.match_id] = g));
   $("#hist-list").insertAdjacentHTML("beforeend", data.games.map(gameRow).join("") ||
-    (reset ? `<p class="empty">No games here. Click "Sync season" in the "My data" tab.</p>` : ""));
+    (reset ? `<p class="empty">No games here yet. Click "Check for new games".</p>` : ""));
   hist.offset += data.games.length;
   $("#hist-more").hidden = data.games.length < 20;
+  if (hist.openAfterLoad && GAMES[hist.openAfterLoad]) {
+    const id = hist.openAfterLoad;
+    hist.openAfterLoad = null;
+    toggleGame(id);
+  }
 }
 
 function renderHistSummary({ summary: s, top_champions: top }) {
@@ -370,8 +557,7 @@ function renderHistSummary({ summary: s, top_champions: top }) {
       <div class="big-stat"><strong>${num(kda, 2)}</strong><small>KDA (${num(s.k)}/${num(s.d)}/${num(s.a)})</small></div>
       <div class="big-stat"><strong>${num(s.cspm)}</strong><small>CS/min</small></div>
       <div class="big-stat"><strong>${fmtK(s.dmg)}</strong><small>avg damage</small></div>
-      <div class="big-stat"><strong>${fmtK(s.gold)}</strong><small>avg gold</small></div>
-      <div class="big-stat"><strong>${pct(s.kp)}</strong><small>KP</small></div>
+      <div class="big-stat"><strong>${pct(s.kp)}</strong><small>kill participation</small></div>
       <div class="big-stat"><strong>${num(s.score)}</strong><small>avg score · ${s.mvp || 0} MVP · ${s.ace || 0} ACE</small></div>
       <div class="top-champs">${top.map((t) => `
         <div title="${esc(t.name)}">${icon(t, "ico")}<small>${t.g}g · <span class="${t.w / t.g >= 0.5 ? "good" : "bad"}">${pct(t.w / t.g)}</span><br>${num((t.k + t.a) / Math.max(t.d, 1), 1)} KDA</small></div>`).join("")}</div>
@@ -388,7 +574,7 @@ function gameRow(g) {
         <strong>${esc(g.queue)}</strong>
         <small>${ago(g.game_creation)}</small>
         <span class="${m.win ? "good" : "bad"}">${m.placement ? `#${m.placement}` : m.win ? "Victory" : "Defeat"}</span>
-        <small>${mins(g.duration)}</small>
+        <small>${mins(g.duration)}${g.has_report ? ` · <span class="analysed">analysed</span>` : ""}</small>
       </div>
       <div class="g-champ">
         <div class="champ-lvl">${icon(m.champion, "ico big")}<span>${m.level}</span></div>
@@ -404,192 +590,91 @@ function gameRow(g) {
         <small>CS ${m.cs} (${num(m.cs / (g.duration / 60))})</small>
         <small>KP ${pct(m.kp)}</small>
         <small>Damage ${fmtK(m.damage)}</small>
-        <small>Gold ${fmtK(m.gold)}</small>
         <small>Vision ${m.vision}</small>
       </div>
       <div class="g-items">${itemsRow(m.items)}</div>
       <div class="g-teams">${g.teams.slice(0, 2).map((t) => `<div>${t.map((p) =>
         `<span class="${p.is_me ? "me" : ""}"><img src="${p.icon}" alt="">${esc(p.name)}</span>`).join("")}</div>`).join("")}</div>
+      <span class="chev">›</span>
     </div>
     <div class="game-detail" hidden></div>
   </div>`;
 }
 
+// abrir um jogo = análise pós-jogo (gerada na hora se ainda não existir) + mapa + tabela
+const REPORTS = {};
 async function toggleGame(id) {
-  const el = document.querySelector(`.game[data-id="${id}"] .game-detail`);
-  if (!el.hidden) { el.hidden = true; return; }
-  if (!el.innerHTML) {
-    const d = await (await fetch(`/api/history/${id}`)).json();
-    el.innerHTML = d.teams.map((t) => `
-      <div class="table-wrap"><table class="detail-table ${t.win ? "win" : "loss"}">
-        <thead><tr><th>${t.win ? "Victory" : "Defeat"} · ${t.kills} kills · ${fmtK(t.gold)} gold</th>
-          <th>Score</th><th>KDA</th><th>Damage</th><th>Gold</th><th>CS</th><th>Vision</th><th>Items</th></tr></thead>
-        <tbody>${t.players.map((p) => `
-          <tr class="${p.is_me ? "me" : ""}">
-            <td class="who">${icon(p.champion, "ico")}<span class="lvl">${p.level}</span>
-              <span class="spells">${p.spells.map((s) => icon(s, "ico tiny")).join("")}</span>${icon(p.keystone, "ico tiny")}
-              <span class="pname">${esc(p.name.split("#")[0])}<small>${POS_PT[p.position] ?? ""}</small></span></td>
-            <td>${scoreTag(p)}</td>
-            <td>${p.kills}/${p.deaths}/${p.assists}<small> (${pct(p.kp)})</small></td>
-            <td><div class="dmg"><span style="width:${Math.round((100 * p.damage) / d.max_damage)}%"></span></div>${fmtK(p.damage)}</td>
-            <td>${fmtK(p.gold)}</td>
-            <td>${p.cs}</td>
-            <td>${p.vision}<small> (${p.control_wards})</small></td>
-            <td class="items-cell">${itemsRow(p.items, "ico tiny")}</td>
-          </tr>`).join("")}</tbody>
-      </table></div>`).join("");
-  }
+  const box = document.querySelector(`.game[data-id="${id}"]`);
+  const el = box.querySelector(".game-detail");
+  if (!el.hidden) { el.hidden = true; box.classList.remove("open"); return; }
   el.hidden = false;
-}
-
-// ---------------------------------------------------------------- mains
-const mainsState = { champs: [], mine: [], mineError: "", filter: "mine", selected: null, sort: "points", view: "all" };
-
-function mainsTable(rep, compact) {
-  if (!rep.mains.length)
-    return `<p class="muted">No known mains for ${esc(rep.champion.name)} yet. Collect masteries in the "Mains" tab.</p>`;
-  return `<div class="table-wrap"><table class="mains-table">
-    <thead><tr><th>#</th><th>Player</th><th>Region</th><th>Rank</th><th>Mastery</th>${compact ? "" : "<th>Role</th>"}<th>Games*</th><th>WR</th><th>KDA</th><th>Rune</th><th>Items</th></tr></thead>
-    <tbody>${rep.mains.map((m, i) => `
-      <tr>
-        <td>${i + 1}</td>
-        <td><strong>${esc(m.name || "…")}</strong></td>
-        <td><span class="tag">${m.region}</span></td>
-        <td>${m.tier === "CHALLENGER" ? "Challenger" : "Grandmaster"} <small class="muted">${m.lp} LP</small></td>
-        <td>${fmtK(m.points)}</td>
-        ${compact ? "" : `<td>${m.position ? POS_PT[m.position] ?? m.position : "–"}</td>`}
-        <td>${m.games || "–"}</td>
-        <td>${m.winrate == null ? "–" : `<span class="${m.winrate >= 0.5 ? "good" : "bad"}">${pct(m.winrate)}</span>`}</td>
-        <td>${m.kda == null ? "–" : num(m.kda, 2)}</td>
-        <td>${m.keystone?.icon ? icon(m.keystone, "ico small") : "–"}</td>
-        <td class="items-cell">${m.items.length ? m.items.map((it) => icon(it, "ico small")).join("") : "–"}</td>
-      </tr>`).join("")}</tbody>
-  </table></div>
-  <p class="muted small-note">* games of these players on this champion that are already in the database.</p>`;
-}
-
-function renderCsMains(rep) {
-  $("#cs-mains").innerHTML = `
-    <p class="muted">Top 5 <strong>${esc(rep.champion.name)}</strong> mains (most mastery points, Challenger/GM EUW + KR)</p>
-    ${mainsTable(rep, true)}
-    ${rep.sample ? `<details><summary>Mains' runes and build (${rep.sample} games)</summary>${buildDetailHtml(rep)}</details>` : ""}`;
-}
-
-async function loadMainsList() {
-  const [data, mine] = await Promise.all([
-    fetch("/api/mains").then((r) => r.json()),
-    fetch("/api/my-mastery").then((r) => r.json()).catch(() => ({ ok: false, champions: [] })),
-  ]);
-  mainsState.champs = data.champions;
-  mainsState.mine = mine.champions || [];
-  mainsState.mineError = mine.ok ? "" : mine.error || "";
-  $("#mains-count").textContent = data.players ? `${data.players} Challenger/GM players with collected masteries` : "No masteries collected yet";
-  renderMainsGrid();
-}
-
-function renderMainsGrid() {
-  const q = $("#mains-search").value.trim().toLowerCase();
-  const mineRank = new Map(mainsState.mine.map((c, i) => [c.id, i + 1]));
-  const byId = new Map(mainsState.champs.map((c) => [c.id, c]));
-  const showMine = mainsState.filter === "mine";
-  // "My top 10": por ordem de maestria; "All": todos, com os teus 10 marcados com ★
-  const list = showMine ? mainsState.mine.map((m) => ({ ...(byId.get(m.id) || m), points: m.points })) : mainsState.champs;
-  const tiles = list
-    .filter((c) => !q || c.name.toLowerCase().includes(q))
-    .map((c) => {
-      const rank = mineRank.get(c.id);
-      return `<button class="champ-tile ${c.id === mainsState.selected ? "active" : ""} ${c.mains ? "" : "empty-tile"} ${rank ? "mine" : ""}"
-        onclick="openMains(${c.id})" title="${esc(c.name)} · ${c.mains ?? 0} known mains${rank ? ` · your #${rank} by mastery` : ""}">
-        ${rank ? `<span class="mine-badge">★${rank}</span>` : ""}
-        <img src="${c.icon}" alt=""><span>${esc(c.name)}</span>
-        ${showMine ? `<small class="pts">${fmtK(c.points)} pts</small>` : ""}</button>`;
-    }).join("");
-  $("#mains-grid").classList.toggle("mine-grid", showMine);
-  $("#mains-grid").innerHTML = tiles || (showMine
-    ? `<p class="muted">${esc(mainsState.mineError || "Could not load your masteries.")}</p>`
-    : `<p class="muted">No champion found.</p>`);
-}
-
-document.querySelectorAll("#mains-filter button").forEach((b) =>
-  b.addEventListener("click", () => {
-    mainsState.filter = b.dataset.filter;
-    document.querySelectorAll("#mains-filter button").forEach((x) => x.classList.toggle("active", x === b));
-    renderMainsGrid();
-  })
-);
-
-async function openMains(id, quiet = false) {
-  // quiet = recarregar o mesmo boneco (nomes/jogos novos chegaram) sem limpar o ecrã nem a vista escolhida
-  if (mainsState.selected !== id) mainsState.view = "all";
-  mainsState.selected = id;
-  renderMainsGrid();
-  if (!quiet) $("#mains-panel").innerHTML = `<p class="muted">Loading…</p>`;
-  const rep = await (await fetch(`/api/mains/${id}?sort=${mainsState.sort}`)).json();
-  $("#mains-panel").innerHTML = `
-    <div class="mains-head">${icon(rep.champion, "ico big")}<h2>${esc(rep.champion.name)}</h2>
-      <label>Sort by <select id="mains-sort">
-        <option value="points" ${mainsState.sort === "points" ? "selected" : ""}>Mastery points</option>
-        <option value="lp" ${mainsState.sort === "lp" ? "selected" : ""}>LP</option></select></label>
-      <button id="mains-refresh" data-job="mains_games" class="secondary">Update these mains' games</button>
-      <span id="job-mains_games" class="muted"></span>
+  box.classList.add("open");
+  if (el.dataset.loaded) return;
+  el.dataset.loaded = "1";
+  const g = GAMES[id];
+  el.innerHTML = `
+    <div class="subtabs gd-tabs">
+      ${g.analysable ? `<button data-v="analysis" class="active">Analysis</button><button data-v="map">Map & timeline</button>` : ""}
+      <button data-v="board" class="${g.analysable ? "" : "active"}">Scoreboard</button>
     </div>
-    ${rep.auto_refresh ? `<p class="muted small-note">Updating these mains' recent games in the background… the page refreshes itself when done.</p>` : ""}
-    ${rep.names_pending ? `<p class="muted small-note">Looking up player names…</p>` : ""}
-    ${mainsTable(rep, false)}
-    ${rep.sample ? `
-      <div class="subtabs main-pick">
-        <button data-main="all" class="active">All (${rep.sample} games)</button>
-        ${rep.mains.map((m, i) => `<button data-main="${i}" ${m.games ? "" : "disabled"}>${i + 1}. ${esc((m.name || "?").split("#")[0])} (${m.games})</button>`).join("")}
-        <button data-main="compare">Compare</button>
-      </div>
-      <div id="main-build"></div>`
-      : `<p class="muted">No games of these mains in the database yet.</p>`}`;
-  if (rep.sample) {
-    const show = (key) => {
-      mainsState.view = key;
-      document.querySelectorAll(".main-pick button").forEach((b) => b.classList.toggle("active", b.dataset.main === key));
-      $("#main-build").innerHTML = key === "all" ? buildDetailHtml(rep)
-        : key === "compare" ? compareMains(rep) : buildDetailHtml(rep.mains[+key].build);
-    };
-    document.querySelectorAll(".main-pick button").forEach((b) => b.addEventListener("click", () => show(b.dataset.main)));
-    show(rep.mains[+mainsState.view]?.games || ["all", "compare"].includes(mainsState.view) ? mainsState.view : "all");
-  }
-  $("#mains-sort").addEventListener("change", (e) => { mainsState.sort = e.target.value; openMains(id); });
-  $("#mains-refresh").addEventListener("click", async () => {
-    const res = await (await fetch(`/api/mains/${id}/refresh`, { method: "POST" })).json();
-    if (!res.ok && res.error) $("#job-mains_games").textContent = res.error;
-  });
+    <div class="gd-pane" data-v="analysis" ${g.analysable ? "" : "hidden"}><div class="loading">Analysing this game…</div></div>
+    <div class="gd-pane" data-v="map" hidden></div>
+    <div class="gd-pane" data-v="board" ${g.analysable ? "hidden" : ""}><div class="loading">Loading…</div></div>`;
+  el.querySelectorAll(".gd-tabs button").forEach((b) => b.addEventListener("click", () => {
+    el.querySelectorAll(".gd-tabs button").forEach((x) => x.classList.toggle("active", x === b));
+    el.querySelectorAll(".gd-pane").forEach((p) => (p.hidden = p.dataset.v !== b.dataset.v));
+    if (b.dataset.v === "map") openMap(id, el);
+  }));
+  getJSON(`/api/history/${id}`).then((d) => (el.querySelector('.gd-pane[data-v="board"]').innerHTML = scoreboardHtml(d)));
+  if (g.analysable) loadAnalysis(id, el);
 }
 
-$("#mains-search").addEventListener("input", renderMainsGrid);
-$("#mastery-crawl").addEventListener("click", () =>
-  fetch("/api/mains/crawl", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ regions: [...document.querySelectorAll(".mastery-region:checked")].map((c) => c.value) }),
-  })
-);
+async function loadAnalysis(id, el, force = false) {
+  const pane = el.querySelector('.gd-pane[data-v="analysis"]');
+  let r = force ? null : (await getJSON(`/api/postgame/${encodeURIComponent(id)}`)).report;
+  if (!r || !r.detail) {
+    pane.innerHTML = `<div class="loading">Analysing this game… (downloading the timeline from Riot)</div>`;
+    const res = await getJSON(`/api/postgame/analyse?match_id=${encodeURIComponent(id)}`, { method: "POST" });
+    if (!res.ok) { pane.innerHTML = `<p class="muted">${esc(res.error || "Could not analyse this game.")}</p>`; return; }
+    r = res.report;
+    GAMES[id].has_report = true;
+  }
+  REPORTS[id] = r;
+  pane.innerHTML = analysisHtml(r);
+  el.querySelector('.gd-pane[data-v="map"]').innerHTML = "";
+}
 
-// ---------------------------------------------------------------- pós-jogo: detalhe
+function scoreboardHtml(d) {
+  if (!d.ok) return `<p class="muted">No details for this game.</p>`;
+  return d.teams.map((t) => `
+    <div class="table-wrap"><table class="detail-table ${t.win ? "win" : "loss"}">
+      <thead><tr><th>${t.win ? "Victory" : "Defeat"} · ${t.kills} kills · ${fmtK(t.gold)} gold</th>
+        <th>Score</th><th>KDA</th><th>Damage</th><th>Gold</th><th>CS</th><th>Vision</th><th>Items</th></tr></thead>
+      <tbody>${t.players.map((p) => `
+        <tr class="${p.is_me ? "me" : ""}">
+          <td class="who-cell">${icon(p.champion, "ico")}<span class="lvl">${p.level}</span>
+            <span class="spells">${p.spells.map((s) => icon(s, "ico tiny")).join("")}</span>${icon(p.keystone, "ico tiny")}
+            <span class="pname">${esc(p.name.split("#")[0])}<small class="muted">${POS_PT[p.position] ?? ""}</small></span></td>
+          <td>${scoreTag(p)}</td>
+          <td>${p.kills}/${p.deaths}/${p.assists}<small> (${pct(p.kp)})</small></td>
+          <td><div class="dmg"><span style="width:${Math.round((100 * p.damage) / d.max_damage)}%"></span></div>${fmtK(p.damage)}</td>
+          <td>${fmtK(p.gold)}</td>
+          <td>${p.cs}</td>
+          <td>${p.vision}<small> (${p.control_wards})</small></td>
+          <td class="items-cell">${itemsRow(p.items, "ico tiny")}</td>
+        </tr>`).join("")}</tbody>
+    </table></div>`).join("");
+}
+
+// ---------------------------------------------------------------- análise pós-jogo
 const PG_CATS = {
-  farm: "Farming", lane: "Laning phase", deaths: "Deaths", vision: "Vision", wards: "Control wards",
-  fights: "Fights / damage", items: "Items", compare: "Comparisons",
+  farm: "Farming", lane: "Laning", deaths: "Deaths", vision: "Vision", wards: "Control wards",
+  fights: "Fights & damage", items: "Items", compare: "Comparisons",
 };
 const pgCats = (() => {
-  try { return { ...Object.fromEntries(Object.keys(PG_CATS).map((k) => [k, true])), ...JSON.parse(localStorage.getItem("pgCats") || "{}") }; }
-  catch { return Object.fromEntries(Object.keys(PG_CATS).map((k) => [k, true])); }
+  const all = Object.fromEntries(Object.keys(PG_CATS).map((k) => [k, true]));
+  try { return { ...all, ...JSON.parse(localStorage.getItem("pgCats") || "{}") }; } catch { return all; }
 })();
-let PG_REPORTS = [];
-
-function renderPgCats() {
-  $("#pg-cats").innerHTML = `<span class="muted">Analyse:</span>` + Object.entries(PG_CATS).map(([k, label]) =>
-    `<label class="inline"><input type="checkbox" data-cat="${k}" ${pgCats[k] ? "checked" : ""}> ${label}</label>`).join("");
-  $("#pg-cats").querySelectorAll("input").forEach((c) => c.addEventListener("change", () => {
-    pgCats[c.dataset.cat] = c.checked;
-    try { localStorage.setItem("pgCats", JSON.stringify(pgCats)); } catch {}
-    $("#pg-list").innerHTML = PG_REPORTS.map(renderReport).join("");
-  }));
-}
 
 function pgScore(feedback) {
   const good = feedback.filter((f) => f.type === "good").length;
@@ -597,48 +682,57 @@ function pgScore(feedback) {
   return Math.round((100 * (good + 1)) / (good + bad + 2));
 }
 
-function renderReport(r) {
+function analysisHtml(r) {
   const m = r.metrics;
-  const date = new Date(r.date).toLocaleString("en-GB");
   const stat = (label, val) => `<div class="stat"><small>${label}</small><strong>${val}</strong></div>`;
   const diff = (v) => (v == null ? "–" : `${v > 0 ? "+" : ""}${v}`);
   const fb = r.feedback.filter((f) => pgCats[f.cat ?? "compare"] !== false);
   return `
-  <article class="card report ${r.win ? "win" : "loss"}" data-id="${r.match_id}">
-    <header>
+    <div class="an-head">
       ${icon(r.champion, "ico big")}
-      <div>
-        <h2>${r.win ? "Victory" : "Defeat"} · ${esc(r.champion.name)} ${r.opponent ? `vs ${esc(r.opponent.name)}` : ""}</h2>
-        <span class="muted">${POS_PT[r.position] ?? r.position} · ${r.duration_min} min · ${date}</span>
-      </div>
-      <div class="score" title="Score based on strengths vs things to improve (selected categories only)">${pgScore(fb)}</div>
-    </header>
+      <div><strong>${esc(r.champion.name)}${r.opponent ? ` vs ${esc(r.opponent.name)}` : ""}</strong><br>
+        <span class="muted">${POS_PT[r.position] ?? r.position} · ${r.duration_min} min</span></div>
+      <div class="score" title="Strengths vs things to improve (selected categories only)"><b>${pgScore(fb)}</b><small>game rating</small></div>
+    </div>
     <div class="stats-grid">
       ${stat("KDA", `${m.kills}/${m.deaths}/${m.assists}`)}
       ${stat("CS/min", num(m.cspm))}
-      ${stat("CS @10", m.cs10 ?? "–")}
-      ${stat("Gold @15 vs opp.", diff(m.gold_diff15))}
+      ${stat("CS at 10 min", m.cs10 ?? "–")}
+      ${stat("Gold at 15 vs opponent", diff(m.gold_diff15))}
       ${stat("Vision/min", num(m.vspm, 2))}
       ${stat("Control wards", m.control_wards)}
-      ${stat("KP", pct(m.kp))}
-      ${stat("Damage %", pct(m.damage_share))}
+      ${stat("Kill participation", pct(m.kp))}
+      ${stat("Damage share", pct(m.damage_share))}
     </div>
+    <div class="pg-cats">${Object.entries(PG_CATS).map(([k, label]) =>
+      `<label class="chip ${pgCats[k] ? "on" : ""}"><input type="checkbox" data-cat="${k}" ${pgCats[k] ? "checked" : ""} onchange="toggleCat(this)">${label}</label>`).join("")}</div>
     <ul class="feedback">${fb.map((f) => `<li class="${f.type}">${esc(f.text)}</li>`).join("") || `<li class="info">No category selected.</li>`}</ul>
-    <div class="row">
-      ${r.detail ? `<button class="secondary" onclick="toggleDetail('${r.match_id}')">Show game details (map, kills, build)</button>`
-        : `<button class="secondary" onclick="reanalyse('${r.match_id}')">Generate game details</button>`}
-      <button class="secondary" onclick="reanalyse('${r.match_id}')" title="Run the analysis again (e.g. games analysed with an older version)">↻ Re-analyse</button>
-    </div>
-    <div class="pg-detail" hidden></div>
-  </article>`;
+    <div class="row"><button class="secondary" onclick="reanalyse('${r.match_id}')" title="Run the analysis again">↻ Re-analyse</button></div>`;
 }
 
-async function reanalyse(id) {
-  $("#pg-msg").textContent = "Analysing…";
-  const res = await (await fetch(`/api/postgame/analyse?match_id=${encodeURIComponent(id)}`, { method: "POST" })).json();
-  $("#pg-msg").textContent = res.ok ? "" : res.error || "Could not analyse the game.";
-  await loadPostgames();
-  if (res.ok) toggleDetail(id);
+function toggleCat(input) {
+  pgCats[input.dataset.cat] = input.checked;
+  try { localStorage.setItem("pgCats", JSON.stringify(pgCats)); } catch {}
+  $$(".game.open").forEach((g) => {
+    const r = REPORTS[g.dataset.id];
+    const pane = g.querySelector('.gd-pane[data-v="analysis"]');
+    if (r && pane) pane.innerHTML = analysisHtml(r);
+  });
+}
+
+function reanalyse(id) {
+  const el = document.querySelector(`.game[data-id="${id}"] .game-detail`);
+  loadAnalysis(id, el, true);
+}
+
+async function openMap(id, el) {
+  const pane = el.querySelector('.gd-pane[data-v="map"]');
+  if (pane.innerHTML) return;
+  if (!REPORTS[id]) { pane.innerHTML = `<div class="loading">Waiting for the analysis…</div>`; setTimeout(() => (pane.innerHTML = "", openMap(id, el)), 1500); return; }
+  const r = REPORTS[id];
+  if (!r.detail) { pane.innerHTML = `<p class="muted">No timeline for this game. Try "Re-analyse".</p>`; return; }
+  pane.innerHTML = `<div class="map-pane">${detailHtml(r)}</div>`;
+  drawMap(r, pane.querySelector(".map-pane"));
 }
 
 // coordenadas do Summoner's Rift -> píxeis do minimapa (512x512)
@@ -651,16 +745,6 @@ const OBJ_PT = {
   HEXTECH_DRAGON: "Hextech Drake", CHEMTECH_DRAGON: "Chemtech Drake", ELDER_DRAGON: "Elder Dragon",
   BARON_NASHOR: "Baron", RIFTHERALD: "Rift Herald", HORDE: "Voidgrubs", ATAKHAN: "Atakhan",
 };
-
-function toggleDetail(id) {
-  const card = document.querySelector(`.report[data-id="${id}"]`);
-  const el = card.querySelector(".pg-detail");
-  if (!el.hidden) { el.hidden = true; return; }
-  const r = PG_REPORTS.find((x) => x.match_id === id);
-  if (!el.innerHTML) el.innerHTML = detailHtml(r);
-  el.hidden = false;
-  drawMap(r, el);
-}
 
 function detailHtml(r) {
   const d = r.detail;
@@ -680,7 +764,7 @@ function detailHtml(r) {
           <label class="inline"><input type="checkbox" data-layer="objectives" checked> Objectives</label>
           <label class="inline"><input type="checkbox" data-layer="mypath" checked> My path</label>
           <label class="inline"><input type="checkbox" data-layer="enemyjg" ${d.enemy_jg_pid ? "checked" : "disabled"}> Enemy jungler path</label>
-          <label class="inline"><input type="checkbox" data-layer="onlyme"> Only events I was in</label>
+          <label class="inline"><input type="checkbox" data-layer="onlyme"> Only fights I was in</label>
         </div>
         <p class="muted small-note">Riot provides each player's position once per minute, and the exact position of every kill/objective.</p>
       </div>
@@ -755,7 +839,7 @@ function goldChart(d) {
 }
 
 function seekMap(li) {
-  const el = li.closest(".pg-detail");
+  const el = li.closest(".map-pane");
   const slider = el.querySelector(".minute");
   slider.value = Math.min(+slider.max, Math.ceil(+li.dataset.t));
   slider.dispatchEvent(new Event("input"));
@@ -823,6 +907,145 @@ function drawMap(r, el) {
   };
   render();
 }
+
+// ---------------------------------------------------------------- mains
+const mainsState = { champs: [], mine: [], mineError: "", filter: "mine", selected: null, sort: "points", view: "all" };
+const REGION_NAMES = { euw1: "EUW", kr: "KR", eun1: "EUNE", na1: "NA" };
+
+function mainsTable(rep, compact) {
+  if (!rep.mains.length)
+    return `<p class="muted">No known mains for ${esc(rep.champion.name)} yet. They appear once the top players list is updated (Mains tab).</p>`;
+  return `<div class="table-wrap"><table class="mains-table">
+    <thead><tr><th>#</th><th>Player</th><th>Region</th><th>Rank</th><th>Mastery</th>${compact ? "" : "<th>Role</th>"}<th>Games*</th><th>WR</th><th>KDA</th><th>Rune</th><th>Items</th></tr></thead>
+    <tbody>${rep.mains.map((m, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td><strong>${esc(m.name || "…")}</strong></td>
+        <td><span class="tag">${m.region}</span></td>
+        <td>${m.tier === "CHALLENGER" ? "Challenger" : "Grandmaster"} <small class="muted">${m.lp} LP</small></td>
+        <td>${fmtK(m.points)}</td>
+        ${compact ? "" : `<td>${m.position ? POS_PT[m.position] ?? m.position : "–"}</td>`}
+        <td>${m.games || "–"}</td>
+        <td>${m.winrate == null ? "–" : `<span class="${m.winrate >= 0.5 ? "good" : "bad"}">${pct(m.winrate)}</span>`}</td>
+        <td>${m.kda == null ? "–" : num(m.kda, 2)}</td>
+        <td>${m.keystone?.icon ? icon(m.keystone, "ico small") : "–"}</td>
+        <td class="items-cell">${m.items.length ? m.items.map((it) => icon(it, "ico small")).join("") : "–"}</td>
+      </tr>`).join("")}</tbody>
+  </table></div>
+  <p class="muted small-note">* recent games of these players on this champion that the app has downloaded.</p>`;
+}
+
+function renderCsMains(rep) {
+  $("#cs-mains").innerHTML = `
+    <p class="muted">Top 5 <strong>${esc(rep.champion.name)}</strong> mains (most mastery points, Challenger/GM EUW + KR)</p>
+    ${mainsTable(rep, true)}
+    ${rep.sample ? `<details><summary>Mains' runes and build (${rep.sample} games)</summary>${buildDetailHtml(rep)}</details>` : ""}`;
+}
+
+async function loadMainsList() {
+  const [data, mine] = await Promise.all([
+    getJSON("/api/mains"),
+    getJSON("/api/my-mastery").catch(() => ({ ok: false, champions: [] })),
+  ]);
+  mainsState.champs = data.champions;
+  mainsState.mine = mine.champions || [];
+  mainsState.mineError = mine.ok ? "" : mine.error || "";
+  const regions = (data.regions || []).map((r) => REGION_NAMES[r] || r).join(" & ");
+  $("#mains-count").textContent = data.players
+    ? `${fmtN(data.players)} Challenger & Grandmaster players${regions ? ` from ${regions}` : ""}`
+    : "No top players yet: click “Update now” to find each champion's best one-trick players";
+  $("#mains-updated").textContent = data.players
+    ? `List updated ${ago(data.updated ? data.updated * 1000 : null)} · it refreshes automatically once a day`
+    : "Takes about 20 minutes the first time.";
+  renderMainsGrid();
+}
+
+function renderMainsGrid() {
+  const q = $("#mains-search").value.trim().toLowerCase();
+  const mineRank = new Map(mainsState.mine.map((c, i) => [c.id, i + 1]));
+  const byId = new Map(mainsState.champs.map((c) => [c.id, c]));
+  const showMine = mainsState.filter === "mine";
+  // "My top 10": por ordem de maestria; "All": todos, com os teus 10 marcados com ★
+  const list = showMine ? mainsState.mine.map((m) => ({ ...(byId.get(m.id) || m), points: m.points })) : mainsState.champs;
+  const tiles = list
+    .filter((c) => !q || c.name.toLowerCase().includes(q))
+    .map((c) => {
+      const rank = mineRank.get(c.id);
+      return `<button class="champ-tile ${c.id === mainsState.selected ? "active" : ""} ${c.mains ? "" : "empty-tile"} ${rank ? "mine" : ""}"
+        onclick="openMains(${c.id})" title="${esc(c.name)} · ${c.mains ?? 0} known mains${rank ? ` · your #${rank} by mastery` : ""}">
+        ${rank ? `<span class="mine-badge">★${rank}</span>` : ""}
+        <img src="${c.icon}" alt=""><span>${esc(c.name)}</span>
+        ${showMine ? `<small class="pts">${fmtK(c.points)} pts</small>` : ""}</button>`;
+    }).join("");
+  $("#mains-grid").classList.toggle("mine-grid", showMine);
+  $("#mains-grid").innerHTML = tiles || (showMine
+    ? `<p class="muted">${esc(mainsState.mineError || "Could not load your masteries.")}</p>`
+    : `<p class="muted">No champion found.</p>`);
+}
+
+$$("#mains-filter button").forEach((b) =>
+  b.addEventListener("click", () => {
+    mainsState.filter = b.dataset.filter;
+    $$("#mains-filter button").forEach((x) => x.classList.toggle("active", x === b));
+    renderMainsGrid();
+  })
+);
+
+async function openMains(id, quiet = false) {
+  // quiet = recarregar o mesmo boneco (nomes/jogos novos chegaram) sem limpar o ecrã nem a vista escolhida
+  if (mainsState.selected !== id) mainsState.view = "all";
+  mainsState.selected = id;
+  renderMainsGrid();
+  if (!quiet) $("#mains-panel").innerHTML = `<div class="loading">Loading…</div>`;
+  const rep = await getJSON(`/api/mains/${id}?sort=${mainsState.sort}`);
+  const last = rep.last_refresh ? +rep.last_refresh * 1000 : null;
+  $("#mains-panel").innerHTML = `
+    <div class="mains-head">${icon(rep.champion, "ico big")}<h2>${esc(rep.champion.name)}</h2>
+      <label>Sort by <select id="mains-sort">
+        <option value="points" ${mainsState.sort === "points" ? "selected" : ""}>Mastery points</option>
+        <option value="lp" ${mainsState.sort === "lp" ? "selected" : ""}>LP</option></select></label>
+      <div class="mains-games">
+        <div class="job-view" data-jobview="mains_games"></div>
+        <small>${JOBS.mains_games?.running ? "" : `Recent games ${last ? `updated ${ago(last)}` : "not downloaded yet"}`}</small>
+        <button id="mains-refresh" data-job="mains_games" class="secondary" title="Download these players' latest games">↻ Refresh games</button>
+      </div>
+    </div>
+    ${rep.names_pending ? `<p class="muted small-note">Looking up player names…</p>` : ""}
+    ${mainsTable(rep, false)}
+    ${rep.sample ? `
+      <div class="subtabs main-pick">
+        <button data-main="all" class="active">All (${rep.sample} games)</button>
+        ${rep.mains.map((m, i) => `<button data-main="${i}" ${m.games ? "" : "disabled"}>${i + 1}. ${esc((m.name || "?").split("#")[0])} (${m.games})</button>`).join("")}
+        <button data-main="compare">Compare</button>
+      </div>
+      <div id="main-build"></div>`
+      : `<p class="muted">${rep.auto_refresh ? "Downloading these players' recent games… this page updates itself when done." : "No games of these mains downloaded yet."}</p>`}`;
+  renderJobs();
+  if (rep.sample) {
+    const show = (key) => {
+      mainsState.view = key;
+      $$(".main-pick button").forEach((b) => b.classList.toggle("active", b.dataset.main === key));
+      $("#main-build").innerHTML = key === "all" ? buildDetailHtml(rep)
+        : key === "compare" ? compareMains(rep) : buildDetailHtml(rep.mains[+key].build);
+    };
+    $$(".main-pick button").forEach((b) => b.addEventListener("click", () => show(b.dataset.main)));
+    show(rep.mains[+mainsState.view]?.games || ["all", "compare"].includes(mainsState.view) ? mainsState.view : "all");
+  }
+  $("#mains-sort").addEventListener("change", (e) => { mainsState.sort = e.target.value; openMains(id); });
+  $("#mains-refresh").addEventListener("click", async () => {
+    const res = await getJSON(`/api/mains/${id}/refresh`, { method: "POST" });
+    if (!res.ok && res.error) $('[data-jobview="mains_games"]').innerHTML = `<small class="bad">${esc(res.error)}</small>`;
+  });
+}
+
+$("#mains-search").addEventListener("input", renderMainsGrid);
+$("#mastery-crawl").addEventListener("click", () =>
+  fetch("/api/mains/crawl", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ regions: [...$$(".mastery-region:checked")].map((c) => c.value) }),
+  })
+);
 
 // ---------------------------------------------------------------- ícones de feitiços, rotas de jungle, comparar mains
 let DD_VERSION = "";
@@ -904,18 +1127,6 @@ function compareMains(rep) {
     </tbody></table></div>`;
 }
 
-// ---------------------------------------------------------------- tarefas automáticas
-async function loadAuto() {
-  const a = await (await fetch("/api/auto")).json();
-  $("#auto-enabled").checked = a.enabled;
-  const when = (t) => (t ? new Date(t * 1000).toLocaleString("en-GB") : "never");
-  $("#auto-last").textContent = `Last run: high elo games ${when(a.last.meta)} · masteries/top 5 ${when(a.last.mastery)} · your games ${when(a.last.sync)}`;
-}
-$("#auto-enabled").addEventListener("change", async (e) => {
-  await fetch(`/api/auto?enabled=${e.target.checked}`, { method: "POST" });
-  loadAuto();
-});
-
 // ---------------------------------------------------------------- rotas fixas de full clear
 // Posição dos campos no mapa (a mesma tabela do backend). 100 = lado azul, 200 = lado vermelho.
 const CAMP_XY = {
@@ -983,3 +1194,181 @@ function setClear(id, key, value) {
   CLEAR_STATE[id][key] = value;
   document.getElementById(id).innerHTML = clearInner(id);
 }
+
+// ---------------------------------------------------------------- dados
+const QUEUE_LABEL = { solo: "Solo/Duo", flex: "Flex", normal: "Normals", aram: "ARAM", other: "Other" };
+let OVERVIEW = null;
+const collect = { target: 1000, regions: ["euw1", "kr"], timelines: true, days: 30 };
+
+async function loadData() {
+  const o = await getJSON("/api/data/overview");
+  OVERVIEW = o;
+  const m = o.mine, h = o.meta;
+  $("#src-mine").innerHTML = `
+    <div class="src-head"><span class="src-icon">◉</span><h3>Your games</h3></div>
+    <div class="src-big">${fmtN(m.games)} <small>games this season</small></div>
+    <div class="chips">${Object.entries(m.by_queue).sort((a, b) => b[1] - a[1]).map(([q, n]) => `<span>${QUEUE_LABEL[q] || q} <b>${fmtN(n)}</b></span>`).join("")}</div>
+    <p class="muted small-note">Last game ${ago(m.last_game)} · checked ${ago(m.updated ? m.updated * 1000 : null)}</p>
+    <div class="src-actions">
+      <button data-job="sync" onclick="$('#sync').click()">↻ Check for new games</button>
+      <div class="job-view" data-jobview="sync"></div>
+    </div>`;
+  const regionChips = h.regions.map((r) => `<span>${REGION_NAMES[r.region] || r.region.toUpperCase()} <b>${fmtN(r.n)}</b></span>`).join("");
+  $("#src-meta").innerHTML = `
+    <div class="src-head"><span class="src-icon">♛</span><h3>High elo games</h3></div>
+    <div class="src-big">${fmtN(h.games)} <small>Challenger & Grandmaster games</small></div>
+    <div class="chips">${regionChips}</div>
+    <p class="muted small-note">${fmtN(h.with_details)} with full details (item order, skills, jungle paths) ·
+      from ${h.first ? new Date(h.first).toLocaleDateString("en-GB", { day: "numeric", month: "short" }) : "–"} to ${h.last ? ago(h.last) : "–"} ·
+      updated ${ago(h.updated ? h.updated * 1000 : null)}</p>
+    <div class="collect">
+      <span class="muted">Get new games</span>
+      <div class="seg" id="collect-n">${[500, 1000, 5000].map((n) =>
+        `<button data-n="${n}" class="${collect.target === n ? "active" : ""}">+${fmtN(n)}</button>`).join("")}</div>
+      <input type="number" id="collect-custom" min="1" max="50000" step="100" placeholder="other" value="${[500, 1000, 5000].includes(collect.target) ? "" : collect.target}">
+    </div>
+    <p class="muted small-note" id="collect-est"></p>
+    <div class="src-actions">
+      <button data-job="meta" id="collect-go"></button>
+      <button class="secondary" id="collect-stop" hidden>■ Stop</button>
+      <div class="job-view" data-jobview="meta"></div>
+    </div>
+    <details class="advanced">
+      <summary>Advanced options</summary>
+      <div class="row"><span class="muted">Regions</span>${o.regions.map((r) =>
+        `<label class="inline"><input type="checkbox" class="crawl-region" value="${r}" ${collect.regions.includes(r) ? "checked" : ""}> ${REGION_NAMES[r] || r}</label>`).join("")}</div>
+      <div class="row">
+        <label class="inline"><input type="checkbox" id="collect-tl" ${collect.timelines ? "checked" : ""}> Full details (item order, skills, jungle paths: about 2× slower)</label>
+      </div>
+      <div class="row">
+        <label class="inline">Only games from the last <input type="number" id="collect-days" value="${collect.days}" min="1" max="120"> days</label>
+      </div>
+      ${h.games - h.with_details > 0 ? `<div class="row">
+        <button class="secondary" data-job="meta" id="backfill-go">Add details to ${fmtN(Math.min(1000, h.games - h.with_details))} older games</button>
+        <span class="muted small-note">${fmtN(h.games - h.with_details)} games still without details</span></div>` : ""}
+      <p class="muted small-note">Games already in the database are never downloaded again. The app goes through Challenger, then Grandmaster, then Master players, further back in each one's history, until it reaches the number you asked for.</p>
+    </details>`;
+  const syncCollect = () => {
+    collect.regions = [...$$(".crawl-region:checked")].map((c) => c.value);
+    collect.timelines = $("#collect-tl").checked;
+    collect.days = +$("#collect-days").value || 30;
+    const regions = Math.max(1, collect.regions.length);
+    const perMin = collect.timelines ? 22 : 40; // jogos/minuto por região (limite de pedidos da chave)
+    const m = Math.ceil(collect.target / regions / perMin);
+    $("#collect-go").textContent = `＋ Get ${fmtN(collect.target)} new games`;
+    $("#collect-est").textContent = `About ${m < 60 ? `${m} min` : `${(m / 60).toFixed(1)} h`} with ${regions} region${regions > 1 ? "s" : ""} in parallel. The app keeps working meanwhile, and you can stop at any time without losing what was downloaded.`;
+  };
+  $$("#collect-n button").forEach((b) => b.addEventListener("click", () => {
+    collect.target = +b.dataset.n;
+    $$("#collect-n button").forEach((x) => x.classList.toggle("active", x === b));
+    $("#collect-custom").value = "";
+    syncCollect();
+  }));
+  $("#collect-custom").addEventListener("input", (e) => {
+    if (+e.target.value > 0) {
+      collect.target = Math.min(50000, +e.target.value);
+      $$("#collect-n button").forEach((x) => x.classList.remove("active"));
+      syncCollect();
+    }
+  });
+  $$(".crawl-region, #collect-tl, #collect-days").forEach((x) => x.addEventListener("change", syncCollect));
+  syncCollect();
+  $("#collect-go").addEventListener("click", async () => {
+    syncCollect();
+    const res = await getJSON("/api/meta/collect", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: collect.target, regions: collect.regions, days: collect.days, timelines: collect.timelines }),
+    });
+    if (!res.ok && res.error) $('[data-jobview="meta"]').innerHTML = `<small class="bad">${esc(res.error)}</small>`;
+  });
+  $("#collect-stop").addEventListener("click", () => fetch("/api/jobs/meta/stop", { method: "POST" }));
+  $("#backfill-go")?.addEventListener("click", () => fetch("/api/meta/crawl", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ regions: collect.regions, players: 0, timelines: true, backfill: 1000 }),
+  }));
+  $("#auto-enabled").checked = o.auto;
+  const a = await getJSON("/api/auto");
+  const when = (t) => ago(t ? t * 1000 : null);
+  $("#auto-last").textContent = `Last automatic run: high elo games ${when(a.last.meta)} · top players ${when(a.last.mastery)} · your games ${when(a.last.sync)}`;
+  // filtros do explorador
+  const keep = (sel, opts) => { const v = $(sel).value; $(sel).innerHTML = opts; $(sel).value = v; };
+  keep("#ex-region", `<option value="">All regions</option>` + h.regions.map((r) => `<option value="${r.region}">${REGION_NAMES[r.region] || r.region.toUpperCase()}</option>`).join(""));
+  keep("#ex-patch", `<option value="">All patches</option>` + h.patches.map((p) => `<option value="${p.patch}">Patch ${p.patch}</option>`).join(""));
+  renderJobs();
+  loadExplorer();
+}
+$("#auto-enabled").addEventListener("change", (e) => fetch(`/api/auto?enabled=${e.target.checked}`, { method: "POST" }).then(loadData));
+
+// ---------------------------------------------------------------- explorador de bonecos
+const ex = { source: "meta", role: "", sort: "games", dir: -1, rows: [], total: 0, open: null };
+const segBind = (sel, key, attr) => $$(`${sel} button`).forEach((b) => b.addEventListener("click", () => {
+  $$(`${sel} button`).forEach((x) => x.classList.toggle("active", x === b));
+  ex[key] = b.dataset[attr];
+  loadExplorer();
+}));
+segBind("#ex-source", "source", "src");
+segBind("#ex-role", "role", "role");
+["#ex-region", "#ex-patch"].forEach((s) => $(s).addEventListener("change", loadExplorer));
+$("#ex-search").addEventListener("input", renderExplorer);
+$("#ex-rare").addEventListener("change", renderExplorer);
+$$("#ex-table th[data-sort]").forEach((th) => th.addEventListener("click", () => {
+  const k = th.dataset.sort;
+  ex.dir = ex.sort === k ? -ex.dir : k === "name" ? 1 : -1;
+  ex.sort = k;
+  renderExplorer();
+}));
+
+const exQuery = () => new URLSearchParams({ source: ex.source, role: ex.role, region: $("#ex-region").value, patch: $("#ex-patch").value });
+async function loadExplorer() {
+  const d = await getJSON(`/api/data/champions?${exQuery()}`);
+  ex.rows = d.champions;
+  ex.total = d.total_games;
+  ex.open = null;
+  renderExplorer();
+}
+
+function renderExplorer() {
+  const q = $("#ex-search").value.trim().toLowerCase();
+  const minGames = $("#ex-rare").checked ? (ex.source === "me" ? 3 : 20) : 1;
+  const rows = ex.rows.filter((r) => r.games >= minGames && (!q || r.name.toLowerCase().includes(q)))
+    .sort((a, b) => (ex.sort === "name" ? a.name.localeCompare(b.name) : (a[ex.sort] ?? 0) - (b[ex.sort] ?? 0)) * ex.dir);
+  $$("#ex-table th[data-sort]").forEach((th) => {
+    th.classList.toggle("sorted", th.dataset.sort === ex.sort);
+    th.classList.toggle("asc", ex.dir === 1);
+  });
+  const what = ex.source === "me" ? "of your ranked games" : "high elo games";
+  $("#ex-summary").textContent = `${fmtN(ex.total)} ${what} match these filters · ${rows.length} champions · click a champion to see its matchups`;
+  $("#ex-table tbody").innerHTML = rows.map((r) => `
+    <tr class="ex-row ${ex.open === r.champion_id ? "open" : ""}" data-id="${r.champion_id}">
+      <td>${icon(r, "ico small")} ${esc(r.name)}</td>
+      <td>${fmtN(r.games)}</td>
+      <td>${r.pickrate < 0.1 ? `${(r.pickrate * 100).toFixed(1)}%` : pct(r.pickrate)}</td>
+      <td class="${r.winrate >= 0.53 ? "good" : r.winrate <= 0.47 ? "bad" : ""}">${pct(r.winrate)}<span class="wr-bar"><i style="width:${Math.round(r.winrate * 100)}%"></i></span></td>
+      <td>${num(r.kda, 2)}</td><td>${num(r.cspm)}</td><td>${pct(r.dmg)}</td>
+    </tr>${ex.open === r.champion_id ? `<tr class="ex-detail"><td colspan="7"><div class="loading">Loading…</div></td></tr>` : ""}`).join("")
+    || `<tr><td colspan="7" class="muted">No games match these filters.</td></tr>`;
+  $$("#ex-table .ex-row").forEach((tr) => tr.addEventListener("click", () => {
+    ex.open = ex.open === +tr.dataset.id ? null : +tr.dataset.id;
+    renderExplorer();
+  }));
+  if (ex.open) loadExDetail(ex.open);
+}
+
+async function loadExDetail(cid) {
+  const d = await getJSON(`/api/data/champion/${cid}?${exQuery()}`);
+  const cell = $("#ex-table .ex-detail td");
+  if (!cell || ex.open !== cid) return;
+  const mu = (list, empty) => list.length ? `<ul class="mu-list">${list.map((u) => `
+    <li>${icon(u, "ico small")} ${esc(u.name)} <small>${u.g} games</small>
+      <span class="wr ${u.winrate >= 0.5 ? "good" : "bad"}">${pct(u.winrate)}</span></li>`).join("")}</ul>` : `<p class="muted small-note">${empty}</p>`;
+  cell.innerHTML = `<div class="ex-cols">
+    <div><h3>Played as</h3><ul class="mu-list">${d.roles.map((r) => `<li>${POS_PT[r.position] ?? r.position} <small>${fmtN(r.games)} games</small>
+      <span class="wr ${r.winrate >= 0.5 ? "good" : "bad"}">${pct(r.winrate)}</span></li>`).join("") || `<li class="muted">–</li>`}</ul></div>
+    <div><h3>Best against</h3>${mu(d.best, "No winning matchups with 5+ games.")}</div>
+    <div><h3>Worst against</h3>${mu(d.worst, "No losing matchups with 5+ games.")}</div>
+    <div><h3>Most common opponents</h3>${mu(d.common, "–")}</div>
+  </div>`;
+}
+
+// arranque
+renderSides(null);

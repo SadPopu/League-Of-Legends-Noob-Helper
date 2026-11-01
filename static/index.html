@@ -4,124 +4,155 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Noob Helper</title>
-  <link rel="stylesheet" href="/static/style.css?v=14">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="/static/style.css?v=18">
 </head>
-<body>
-<header>
-  <h1>Noob Helper</h1>
-  <div id="status" class="status">
-    <span id="st-lcu" class="pill">Client: ?</span>
-    <span id="st-me" class="pill"></span>
-    <span id="st-phase" class="pill"></span>
+<body data-tab="cs">
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 6v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6l-8-4Z"/><path d="m8.5 12 2.5 2.5 4.5-5" class="tick"/></svg>
+    <span>Noob Helper</span>
   </div>
   <nav>
     <button data-tab="cs" class="active">Champ Select</button>
-    <button data-tab="hist">Match History</button>
+    <button data-tab="profile">Profile</button>
     <button data-tab="mains">Mains</button>
-    <button data-tab="pg">Post-game</button>
-    <button data-tab="data">My data</button>
+    <button data-tab="data">Data</button>
   </nav>
+  <div id="status" class="status">
+    <span id="st-phase" class="pill"></span>
+    <span id="st-lcu" class="pill"><i class="dot"></i><span>Client</span></span>
+  </div>
 </header>
 
 <main>
   <!-- CHAMP SELECT -->
   <section id="tab-cs" class="tab active">
-    <div id="cs-idle" class="empty">Waiting for champ select… (open the LoL client and join a queue, or use the simulator below)</div>
-    <div id="cs-live" hidden>
-      <div id="cs-ingame" class="ingame-banner" hidden>● Game in progress: your champ select build and tips stay here until the game ends.</div>
-      <div class="teams">
-        <div class="team">
-          <h3>Your team</h3>
-          <ul id="allies"></ul>
-        </div>
-        <div class="team">
-          <h3>Enemies <small id="enemy-roles"></small></h3>
-          <ul id="enemies"></ul>
-        </div>
-        <div class="team bans">
-          <h3>Bans</h3>
-          <div id="bans"></div>
-        </div>
-      </div>
+    <div id="cs-ingame" class="ingame-banner" hidden>● Game in progress: your champ select build and tips stay here until the game ends.</div>
+    <div class="cs-layout">
+      <aside class="cs-side ally">
+        <h3 class="side-title">Your team</h3>
+        <div class="ban-block"><small>Bans</small><div id="ally-bans" class="ban-row"></div></div>
+        <ul id="allies" class="slots"></ul>
+      </aside>
 
-      <div class="cards">
-        <article class="card" id="picks-card">
-          <h2>Pick suggestions <small id="picks-pos"></small></h2>
-          <div class="subtabs">
+      <div class="cs-center">
+        <div id="cs-idle" class="cs-idle">
+          <div class="idle-ring"></div>
+          <h2>Waiting for champ select</h2>
+          <p class="muted">Open the League client and join a queue.<br>Pick suggestions, counters and builds appear here automatically.</p>
+          <p class="muted small-note">Want to try it now? Use the simulator button in the bottom-left corner.</p>
+        </div>
+        <div id="cs-live" hidden>
+          <div class="center-head">
+            <div>
+              <span class="eyebrow" id="picks-pos"></span>
+              <h2 id="center-title">Pick suggestions</h2>
+            </div>
+          </div>
+          <div class="subtabs center-tabs" id="center-tabs">
             <button data-sub="mine" class="active">My champs</button>
-            <button data-sub="counters">Counters (high elo)</button>
-            <button data-sub="mains">Mains</button>
+            <button data-sub="counters">Counters</button>
+            <button data-sub="build" disabled>Build</button>
+            <button data-sub="mains" disabled>Mains</button>
           </div>
           <p id="picks-warning" class="warn" hidden></p>
-          <ol id="picks" class="picklist"></ol>
-          <ol id="counters" class="picklist" hidden></ol>
-          <div id="cs-mains" hidden><p class="muted">Pick (or hover) a champion to see its mains.</p></div>
-        </article>
-        <article class="card" id="build-card" hidden>
-          <h2>Build <small id="build-title"></small></h2>
-          <div id="build"></div>
-        </article>
+          <div class="center-body">
+            <ol id="picks" class="picklist"></ol>
+            <ol id="counters" class="picklist" hidden></ol>
+            <div id="build-pane" hidden><p class="build-title muted" id="build-title"></p><div id="build"></div></div>
+            <div id="cs-mains" hidden><p class="muted">Pick (or hover) a champion to see its mains.</p></div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="cs-side enemy">
+        <h3 class="side-title">Enemy team</h3>
+        <div class="ban-block"><small>Bans</small><div id="enemy-bans" class="ban-row"></div></div>
+        <ul id="enemies" class="slots"></ul>
+      </aside>
+    </div>
+  </section>
+
+  <!-- PROFILE (match history + post-game + champion stats) -->
+  <section id="tab-profile" class="tab">
+    <div class="profile-top">
+      <article class="card profile-card" id="profile-card"><p class="muted">Loading profile…</p></article>
+      <article class="card lp-card">
+        <div class="lp-head">
+          <h3>LP progress</h3>
+          <div class="seg" id="lp-queue"><button data-q="solo" class="active">Solo/Duo</button><button data-q="flex">Flex</button></div>
+          <div class="seg" id="lp-range"><button data-d="7" class="active">7 days</button><button data-d="30">30 days</button><button data-d="0">Season</button></div>
+        </div>
+        <div id="lp-chart" class="lp-chart"></div>
+        <p id="lp-note" class="muted small-note"></p>
+      </article>
+    </div>
+
+    <div class="profile-bar">
+      <div class="subtabs big" id="profile-sub">
+        <button data-view="games" class="active">Match history</button>
+        <button data-view="champs">Champions</button>
+      </div>
+      <div class="sync-box">
+        <div class="job-view" data-jobview="sync"></div>
+        <button id="sync" data-job="sync" class="secondary">↻ Check for new games</button>
       </div>
     </div>
 
-    <details class="sim">
-      <summary>Champ select simulator (test without queueing)</summary>
-      <form id="sim-form">
-        <label>Your role
-          <select name="position">
-            <option>TOP</option><option>JUNGLE</option><option selected>MIDDLE</option><option>BOTTOM</option><option>UTILITY</option>
+    <div id="prof-games">
+      <div class="subtabs" id="hist-groups">
+        <button data-group="all" class="active">All <small></small></button>
+        <button data-group="solo">Ranked Solo/Duo <small></small></button>
+        <button data-group="flex">Ranked Flex <small></small></button>
+        <button data-group="normal">Normals <small></small></button>
+        <button data-group="aram">ARAM <small></small></button>
+        <button data-group="other">Other <small></small></button>
+      </div>
+      <div id="hist-summary"></div>
+      <div id="hist-list"></div>
+      <div class="row center"><button id="hist-more" class="secondary" hidden>Load more</button></div>
+    </div>
+
+    <div id="prof-champs" hidden>
+      <article class="card">
+        <div class="row between">
+          <h2>Your ranked stats per champion</h2>
+          <select id="stats-pos">
+            <option value="">All roles</option>
+            <option value="TOP">Top</option><option value="JUNGLE">Jungle</option><option value="MIDDLE">Mid</option>
+            <option value="BOTTOM">ADC</option><option value="UTILITY">Support</option>
           </select>
-        </label>
-        <label>Your champion <input name="champion" list="champ-list" placeholder="(empty = not picked yet)"></label>
-        <label class="inline"><input type="checkbox" name="locked"> Lock in</label>
-        <label>Allies (role:champion, comma separated) <input name="allies" placeholder="TOP:Garen, JUNGLE:Lee Sin"></label>
-        <label>Enemies <input name="enemies" placeholder="Darius, Ahri, Vi"></label>
-        <label>Bans <input name="bans" placeholder="Yasuo, Zed"></label>
-        <div class="row">
-          <button type="submit">Simulate</button>
-          <button type="button" id="sim-end" class="secondary">End</button>
         </div>
-      </form>
-      <datalist id="champ-list"></datalist>
-    </details>
-  </section>
-
-  <!-- POST-GAME -->
-  <section id="tab-pg" class="tab">
-    <div class="row">
-      <button id="pg-analyse">Analyse my last game</button>
-      <span id="pg-msg" class="muted"></span>
+        <div class="table-wrap">
+          <table id="stats">
+            <thead><tr><th>Champion</th><th>Games</th><th>Win rate</th><th>KDA</th><th>CS/min</th><th>Vision/min</th><th>Kill part.</th><th>Damage %</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </article>
     </div>
-    <div class="row pg-cats" id="pg-cats"></div>
-    <div id="pg-list"></div>
-  </section>
-
-  <!-- MATCH HISTORY -->
-  <section id="tab-hist" class="tab">
-    <div class="subtabs" id="hist-groups">
-      <button data-group="all" class="active">All <small></small></button>
-      <button data-group="solo">Ranked Solo/Duo <small></small></button>
-      <button data-group="flex">Ranked Flex <small></small></button>
-      <button data-group="normal">Normals <small></small></button>
-      <button data-group="aram">ARAM <small></small></button>
-      <button data-group="other">Other <small></small></button>
-    </div>
-    <div id="hist-summary"></div>
-    <div id="hist-list"></div>
-    <div class="row"><button id="hist-more" class="secondary" hidden>Load more</button></div>
   </section>
 
   <!-- MAINS -->
   <section id="tab-mains" class="tab">
-    <article class="card">
-      <div class="row">
-        <strong>Challenger + Grandmaster masteries</strong>
-        <label class="inline"><input type="checkbox" class="mastery-region" value="euw1" checked> EUW</label>
-        <label class="inline"><input type="checkbox" class="mastery-region" value="kr" checked> KR</label>
-        <button id="mastery-crawl" data-job="mastery">Collect masteries</button>
-        <span id="job-mastery" class="muted"></span>
+    <article class="card info-strip">
+      <div class="strip-icon">★</div>
+      <div class="strip-text">
+        <strong id="mains-count">Top players</strong>
+        <small class="muted" id="mains-updated"></small>
+        <div class="job-view" data-jobview="mastery"></div>
       </div>
-      <p class="muted small-note"><span id="mains-count"></span> · ~1000 players per region, 1 request each (~20 min, regions in parallel). Players checked in the last 24 h are skipped.</p>
+      <details class="strip-opts">
+        <summary title="Options">⚙</summary>
+        <div class="opts-pop">
+          <span class="muted">Regions to check</span>
+          <label class="inline"><input type="checkbox" class="mastery-region" value="euw1" checked> EUW</label>
+          <label class="inline"><input type="checkbox" class="mastery-region" value="kr" checked> KR</label>
+        </div>
+      </details>
+      <button id="mastery-crawl" data-job="mastery" class="secondary">↻ Update now</button>
     </article>
     <div class="mains-layout">
       <div class="card mains-list">
@@ -136,60 +167,41 @@
     </div>
   </section>
 
-  <!-- MY DATA -->
+  <!-- DATA -->
   <section id="tab-data" class="tab">
-    <article class="card">
-      <div class="row">
-        <label class="inline"><input type="checkbox" id="auto-enabled" checked> <strong>Daily automatic update</strong></label>
-        <span class="muted">While the app is open, once a day: collects high elo games (EUW + KR, with timelines), re-checks masteries and the top 5 mains, and syncs your games.</span>
-      </div>
-      <p class="muted small-note" id="auto-last"></p>
-    </article>
-    <div class="cards">
-      <article class="card">
-        <h2>Your games</h2>
-        <p class="muted">Fetches all your games since the start of the season (every queue). Feeds the Match History tab and your per-champion stats.
-          The first time can take a while (~50 games per minute); after that it only fetches new games.</p>
-        <div class="row">
-          <button id="sync" data-job="sync">Sync season</button>
-          <span id="job-sync" class="muted"></span>
-        </div>
-      </article>
-      <article class="card">
-        <h2>High elo data (meta)</h2>
-        <p class="muted">Collects recent Challenger/GM games. Matchups, runes and items come from here.
-          Each region has its own request limit, so EUW and KR collect in parallel without slowing each other down. Run it again to add more data.</p>
-        <div class="row">
-          <span class="muted">Regions:</span>
-          <label class="inline"><input type="checkbox" class="crawl-region" value="euw1" checked> EUW</label>
-          <label class="inline"><input type="checkbox" class="crawl-region" value="kr" checked> KR</label>
-          <label class="inline"><input type="checkbox" class="crawl-region" value="eun1"> EUNE</label>
-          <label class="inline"><input type="checkbox" class="crawl-region" value="na1"> NA</label>
-        </div>
-        <div class="row">
-          <label>Players <input type="number" id="crawl-players" value="100" min="5" max="1000"></label>
-          <label>Games/player <input type="number" id="crawl-per" value="20" min="5" max="100"></label>
-        </div>
-        <div class="row">
-          <label class="inline"><input type="checkbox" id="crawl-master"> Include Master</label>
-          <label class="inline"><input type="checkbox" id="crawl-tl" checked> Timelines (item order, skills, pathing)</label>
-          <label>Backfill old games <input type="number" id="crawl-backfill" value="300" min="0" max="5000"></label>
-          <button id="crawl" data-job="meta">Collect</button>
-        </div>
-        <p class="muted small-note">With timelines each game costs 2 requests: ~1500 games per hour. You can leave it running while you play.</p>
-        <p><span id="job-meta" class="muted"></span> <span id="meta-count" class="muted"></span></p>
+    <div class="source-cards">
+      <article class="card source-card" id="src-mine"></article>
+      <article class="card source-card" id="src-meta"></article>
+      <article class="card source-card" id="src-auto">
+        <div class="src-head"><span class="src-icon">⟳</span><h3>Automatic updates</h3></div>
+        <label class="switch"><input type="checkbox" id="auto-enabled" checked><span></span> Keep everything up to date</label>
+        <p class="muted small-note">Once a day, while the app is open: new high elo games, the top players list and your own games.</p>
+        <p class="muted small-note" id="auto-last"></p>
       </article>
     </div>
-    <article class="card">
-      <h2>Your stats per champion
-        <select id="stats-pos">
-          <option value="">All roles</option>
-          <option>TOP</option><option>JUNGLE</option><option>MIDDLE</option><option>BOTTOM</option><option>UTILITY</option>
-        </select>
-      </h2>
+
+    <article class="card explorer">
+      <div class="row between">
+        <h2>Explore champions</h2>
+        <div class="seg" id="ex-source"><button data-src="meta" class="active">High elo games</button><button data-src="me">My ranked games</button></div>
+      </div>
+      <div class="row filters">
+        <div class="seg" id="ex-role">
+          <button data-role="" class="active">All roles</button><button data-role="TOP">Top</button><button data-role="JUNGLE">Jungle</button>
+          <button data-role="MIDDLE">Mid</button><button data-role="BOTTOM">ADC</button><button data-role="UTILITY">Support</button>
+        </div>
+        <select id="ex-region"><option value="">All regions</option></select>
+        <select id="ex-patch"><option value="">All patches</option></select>
+        <input id="ex-search" placeholder="Search champion…">
+        <label class="inline"><input type="checkbox" id="ex-rare" checked> Hide rare picks</label>
+      </div>
+      <p class="muted small-note" id="ex-summary"></p>
       <div class="table-wrap">
-        <table id="stats">
-          <thead><tr><th>Champion</th><th>Games</th><th>WR</th><th>KDA</th><th>CS/min</th><th>Vision/min</th><th>KP</th><th>Damage %</th></tr></thead>
+        <table id="ex-table" class="sortable">
+          <thead><tr>
+            <th data-sort="name">Champion</th><th data-sort="games">Games</th><th data-sort="pickrate">Pick rate</th>
+            <th data-sort="winrate">Win rate</th><th data-sort="kda">KDA</th><th data-sort="cspm">CS/min</th><th data-sort="dmg">Damage %</th>
+          </tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -197,6 +209,34 @@
   </section>
 </main>
 
-<script src="/static/app.js?v=14"></script>
+<!-- simulador de champ select -->
+<button id="sim-fab" class="fab" title="Champ select simulator" aria-label="Champ select simulator">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6M10 3v6L4.5 18.5A2 2 0 0 0 6.2 21.5h11.6a2 2 0 0 0 1.7-3L14 9V3"/><path d="M7.5 15h9"/></svg>
+</button>
+<div id="sim-panel" class="sim-panel" hidden>
+  <div class="row between"><h3>Champ select simulator</h3><button type="button" class="icon-btn" id="sim-close" aria-label="Close">✕</button></div>
+  <p class="muted small-note">Test the suggestions without queueing.</p>
+  <form id="sim-form">
+    <label>Your role
+      <select name="position">
+        <option value="TOP">Top</option><option value="JUNGLE">Jungle</option><option value="MIDDLE" selected>Mid</option>
+        <option value="BOTTOM">ADC</option><option value="UTILITY">Support</option>
+      </select>
+    </label>
+    <label>Your champion <input name="champion" list="champ-list" placeholder="empty = not picked yet"></label>
+    <label class="inline"><input type="checkbox" name="locked"> Locked in</label>
+    <label>Allies <small>role:champion, comma separated</small><input name="allies" placeholder="TOP:Garen, JUNGLE:Lee Sin"></label>
+    <label>Enemies <input name="enemies" placeholder="Darius, Ahri, Vi"></label>
+    <label>Your team's bans <input name="bans" placeholder="Yasuo, Zed"></label>
+    <label>Enemy bans <input name="enemy_bans" placeholder="Teemo"></label>
+    <div class="row">
+      <button type="submit">Simulate</button>
+      <button type="button" id="sim-end" class="secondary">End</button>
+    </div>
+  </form>
+  <datalist id="champ-list"></datalist>
+</div>
+
+<script src="/static/app.js?v=18"></script>
 </body>
 </html>

@@ -14,13 +14,14 @@ from pydantic import BaseModel
 from . import config
 from .analysis import my_champion_stats, recommend_build, recommend_counters, recommend_picks
 from .champselect import ChampSelectState, mock_session, parse_session
-from .data import crawl_meta
+from .data import collect_new_games, crawl_meta
 from .history import QUEUE_GROUPS, QUEUE_NAMES, store_match, sync_history
 from .db import DB
 from .ddragon import DDragon
 from .lcu import LCU
 from .mains import crawl_mastery, ensure_names, games_stale, mains_report, refresh_main_games, top_mains
 from .postgame import analyse_match
+from .profile import QUEUES, lp_series, rank_view
 from .riot_api import RiotAPI, RiotAPIError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -47,8 +48,10 @@ class Coach:
         self.picks_sig = None
         self.build_sig = None
         self.jobs: dict[str, dict] = {}
+        self.job_tasks: dict[str, asyncio.Task] = {}
         self.postgame_task: asyncio.Task | None = None
         self.cs_ended = False  # champ select acabou mas a build continua no ecrã (jogo a decorrer)
+        self.profile: dict = {}  # nome, ícone e rank (guardado uns minutos)
 
     # ---------------------------------------------------------------- broadcast
     async def send(self, msg: dict, remember: bool = True):
@@ -146,18 +149,26 @@ class Coach:
         st = parse_session(session)
         await self.send(self.champselect_payload(st))
 
-        if st.picks_signature() != self.picks_sig and not st.locked:
-            self.picks_sig = st.picks_signature()
-            picks = await asyncio.to_thread(recommend_picks, st, self.db, self.dd)
-            await self.send({"type": "picks", **picks})
-            counters = await asyncio.to_thread(recommend_counters, st, self.db, self.dd)
-            await self.send({"type": "counters", **counters})
-
+        # build/mains primeiro (rápidos); sugestões em segundo plano para não atrasar os eventos seguintes
         if st.my_champion and st.build_signature() != self.build_sig:
             self.build_sig = st.build_signature()
             build = await asyncio.to_thread(recommend_build, st, self.db, self.dd)
             await self.send({"type": "build", "locked": st.locked, **build})
             await self.send_mains(st.my_champion)
+
+        if st.picks_signature() != self.picks_sig and not st.locked:
+            self.picks_sig = st.picks_signature()
+            asyncio.create_task(self.send_picks(st, self.picks_sig))
+
+    async def send_picks(self, st: ChampSelectState, sig):
+        """Calcula sugestões e counters; se entretanto houve outro pick, o resultado antigo é descartado."""
+        picks = await asyncio.to_thread(recommend_picks, st, self.db, self.dd)
+        if sig != self.picks_sig:
+            return
+        await self.send({"type": "picks", **picks})
+        counters = await asyncio.to_thread(recommend_counters, st, self.db, self.dd)
+        if sig == self.picks_sig:
+            await self.send({"type": "counters", **counters})
 
     async def send_mains(self, champ: int):
         mains = top_mains(self.db, champ)
@@ -186,6 +197,8 @@ class Coach:
             "allies": [{**a, "champion": champ(a["champion"])} for a in st.allies],
             "enemies": [champ(c) for c in st.enemies],
             "bans": [champ(c) for c in st.bans],
+            "ally_bans": [champ(c) for c in st.ally_bans],
+            "enemy_bans": [champ(c) for c in st.enemy_bans],
         }
 
     # ---------------------------------------------------------------- pós-jogo
@@ -217,8 +230,11 @@ class Coach:
         match = match or await self.riot.match(match_id)
         if not match or self.me["puuid"] not in match["metadata"]["participants"]:
             return None
+        known = self.db.has_history(match_id)
         store_match(self.db, match, self.me["puuid"])  # histórico (todas as filas)
-        await self.send({"type": "history_updated"}, remember=False)
+        if not known:
+            await self.refresh_profile(force=True)
+            await self.send({"type": "history_updated"}, remember=False)
         if match["info"].get("queueId") in ARAM_QUEUES:
             return None
         timeline = await self.riot.timeline(match_id)
@@ -226,6 +242,29 @@ class Coach:
         self.db.save_postgame(match_id, report)
         await self.send({"type": "postgame", "report": report}, remember=False)
         return report
+
+    async def refresh_profile(self, force: bool = False) -> dict:
+        """Nome, nível, ícone e rank (solo/flex); cada vez que o rank muda fica registado para o gráfico de LP."""
+        await self.resolve_me()
+        if not self.me:
+            return {}
+        p = self.profile
+        if force or p.get("puuid") != self.me["puuid"] or time.time() - p.get("ts", 0) > 300:
+            summ = await self.riot.summoner_by_puuid(self.me["puuid"]) or {}
+            entries = await self.riot.league_entries_by_puuid(self.me["puuid"])
+            now = int(time.time() * 1000)
+            for e in entries:
+                if e.get("queueType") in QUEUES.values():
+                    self.db.save_rank(self.me["puuid"], e, now)
+            by_queue = {e.get("queueType"): e for e in entries}
+            self.profile = {
+                "puuid": self.me["puuid"], "ts": time.time(), "name": self.me["name"],
+                "level": summ.get("summonerLevel"),
+                "icon": f"https://ddragon.leagueoflegends.com/cdn/{self.dd.version}/img/profileicon/{summ['profileIconId']}.png"
+                        if summ.get("profileIconId") is not None else None,
+                "ranks": {k: rank_view(by_queue.get(q)) for k, q in QUEUES.items()},
+            }
+        return self.profile
 
     def api_for(self, platform: str) -> RiotAPI:
         """Um cliente por região: cada região tem o seu próprio limite de pedidos."""
@@ -239,21 +278,37 @@ class Coach:
             return False
 
         async def progress(*args):
+            # (região, passo, feito, total) quando há várias regiões em paralelo; (passo, feito, total) senão
+            key = str(args[0]) if len(args) > 3 else "_"
+            step = " ".join(str(a) for a in (args[1:-2] if len(args) > 3 else args[:-2]))
+            self.jobs[name]["parts"][key] = {"step": step, "done": args[-2], "total": args[-1]}
             self.jobs[name]["progress"] = " ".join(str(a) for a in args[:-2]) + f" {args[-2]}/{args[-1]}"
             await self.push_status()
 
         async def runner():
-            self.jobs[name] = {"running": True, "progress": "starting", "result": ""}
+            self.jobs[name] = {"running": True, "progress": "starting", "result": "", "parts": {}, "count": None}
             await self.push_status()
             try:
                 result = await coro_factory(progress)
-                self.jobs[name].update(running=False, result=f"Done: {result} {unit}")
+                self.jobs[name].update(running=False, result=f"Done: {result} {unit}", count=result, ok=True)
+                self.db.kv_set(f"last_job:{name}", str(time.time()))
+            except asyncio.CancelledError:
+                # parado pelo utilizador: o que já foi descarregado fica guardado
+                done = sum(p["done"] for p in self.jobs[name]["parts"].values())
+                self.jobs[name].update(running=False, result="Stopped", count=done, ok=True, stopped=True)
             except Exception as e:
                 log.exception("Job %s falhou", name)
-                self.jobs[name].update(running=False, result=f"Error: {e}")
+                self.jobs[name].update(running=False, result=f"Error: {e}", ok=False)
             await self.push_status()
 
-        asyncio.create_task(runner())
+        self.job_tasks[name] = asyncio.create_task(runner())
+        return True
+
+    def stop_job(self, name: str) -> bool:
+        task = self.job_tasks.get(name)
+        if not task or task.done():
+            return False
+        task.cancel()
         return True
 
 
@@ -278,6 +333,20 @@ def start_meta_job(regions=("euw1", "kr"), players=100, per_player=20, days=14, 
     return coach.start_job("meta", run)
 
 
+def start_collect_job(target: int, regions=("euw1", "kr"), days=30, timelines=True) -> bool:
+    """Vai buscar `target` jogos high elo novos, divididos pelas regiões escolhidas (em paralelo)."""
+    regions = [r for r in regions if r in config.META_PLATFORMS] or [config.PLATFORM]
+    share = [target // len(regions) + (i < target % len(regions)) for i in range(len(regions))]
+
+    async def run(progress):
+        totals = await asyncio.gather(*(collect_new_games(
+            coach.api_for(r), coach.db, n, days=days, timelines=timelines, progress=progress, label=r.upper())
+            for r, n in zip(regions, share)))
+        return sum(totals)
+
+    return coach.start_job("meta", run)
+
+
 def start_mastery_job(regions=("euw1", "kr")) -> bool:
     regions = [r for r in regions if r in config.META_PLATFORMS] or [config.PLATFORM]
 
@@ -292,7 +361,15 @@ def start_mastery_job(regions=("euw1", "kr")) -> bool:
 def start_sync_job() -> bool:
     if not coach.me:
         return False
-    return coach.start_job("sync", lambda p: sync_history(coach.riot, coach.db, coach.me["puuid"], p))
+    async def run(progress):
+        n = await sync_history(coach.riot, coach.db, coach.me["puuid"], progress)
+        try:
+            await coach.refresh_profile(force=True)
+        except RiotAPIError as e:
+            log.warning("Rank: %s", e)
+        return n
+
+    return coach.start_job("sync", run)
 
 
 def start_mains_games_job(champ: int, mains: list[dict]) -> bool:
@@ -327,6 +404,7 @@ async def lifespan(_: FastAPI):
     daily_task = asyncio.create_task(daily_loop() if not os.getenv("NOOB_NO_AUTO") else asyncio.sleep(0))
     await coach.resolve_me()
     asyncio.create_task(my_mastery())  # guarda as tuas maestrias para as sugestões do champ select
+    asyncio.create_task(profile())     # regista o rank atual (gráfico de LP)
     log.info("Open http://127.0.0.1:%s in your browser", config.PORT)
     yield
     lcu_task.cancel()
@@ -432,6 +510,9 @@ async def history(group: str = "all", offset: int = 0, limit: int = 20, champion
         games.append({
             "match_id": d["match_id"], "queue": QUEUE_NAMES.get(d["queue_id"], f"Fila {d['queue_id']}"),
             "game_creation": d["game_creation"], "duration": d["duration"],
+            # a análise pós-jogo (mapa, farm, lane...) só faz sentido no Summoner's Rift
+            "analysable": not d.get("remake") and any(d["queue_id"] in QUEUE_GROUPS[g] for g in ("solo", "flex", "normal")),
+            "has_report": coach.db.postgame(d["match_id"]) is not None,
             "me": _player_view(me), "teams": _teams_compact(d["players"]),
         })
     summary = coach.db.query(
@@ -475,6 +556,25 @@ class CrawlParams(BaseModel):
     include_master: bool = False
     timelines: bool = True
     backfill: int = 300
+
+
+class CollectParams(BaseModel):
+    target: int = 1000
+    regions: list[str] = ["euw1", "kr"]
+    days: int = 30
+    timelines: bool = True
+
+
+@app.post("/api/meta/collect")
+async def meta_collect(params: CollectParams):
+    if coach.jobs.get("meta", {}).get("running"):
+        return {"ok": False, "error": "A collection is already running."}
+    return {"ok": start_collect_job(max(1, min(params.target, 50000)), params.regions, params.days, params.timelines)}
+
+
+@app.post("/api/jobs/{name}/stop")
+async def job_stop(name: str):
+    return {"ok": coach.stop_job(name)}
 
 
 @app.post("/api/meta/crawl")
@@ -525,7 +625,9 @@ async def mains_list():
     champs = sorted(({"id": cid, "name": c["name"], "icon": coach.dd.champ_icon(cid),
                       "mains": counts.get(cid, {}).get("n", 0), "top": counts.get(cid, {}).get("top", 0)}
                      for cid, c in coach.dd.champs.items()), key=lambda c: c["name"])
-    return {"champions": champs, "players": players}
+    return {"champions": champs, "players": players,
+            "regions": [r["platform"] for r in coach.db.query("SELECT DISTINCT platform FROM mains")],
+            "updated": float(coach.db.kv_get("last_job:mastery") or coach.db.kv_get("auto:mastery") or 0) or None}
 
 
 @app.get("/api/mains/{champ}")
@@ -595,6 +697,116 @@ async def postgame_analyse(match_id: str | None = None):
     return {"ok": bool(report), "report": report}
 
 
+@app.get("/api/postgame/{match_id}")
+async def postgame_get(match_id: str):
+    return {"ok": True, "report": coach.db.postgame(match_id)}
+
+
+# ---------------------------------------------------------------- perfil
+@app.get("/api/profile")
+async def profile(refresh: bool = False):
+    try:
+        p = await coach.refresh_profile(force=refresh)
+    except RiotAPIError as e:
+        p = coach.profile or {}
+        if not p:
+            return {"ok": False, "error": str(e)}
+    if not p:
+        return {"ok": False, "error": "Unknown account: open the LoL client or set RIOT_ID in .env"}
+    return {"ok": True, **{k: v for k, v in p.items() if k != "puuid"}}
+
+
+@app.get("/api/lp")
+async def lp(queue: str = "solo"):
+    if queue not in QUEUES or not coach.me:
+        return {"points": []}
+    data = lp_series(coach.db, coach.me["puuid"], queue)
+    for pt in data["points"]:
+        if pt.get("champion_id"):
+            pt["icon"] = coach.dd.champ_icon(pt["champion_id"])
+            pt["champion"] = coach.dd.champ_name(pt.pop("champion_id"))
+    return data
+
+
+# ---------------------------------------------------------------- explorar os dados guardados
+def _last(name: str) -> float | None:
+    return float(coach.db.kv_get(f"last_job:{name}") or coach.db.kv_get(f"auto:{name}") or 0) or None
+
+
+@app.get("/api/data/overview")
+async def data_overview():
+    db = coach.db
+    meta = db.query("""SELECT COUNT(*) n, SUM(has_timeline = 1) t, MIN(game_creation) first, MAX(game_creation) last
+                       FROM matches WHERE kind='meta'""")[0]
+    regions = db.query("""SELECT lower(substr(match_id, 1, instr(match_id, '_') - 1)) region, COUNT(*) n
+                          FROM matches WHERE kind='meta' GROUP BY region ORDER BY n DESC""")
+    patches = db.query("""SELECT patch, COUNT(*) n FROM matches WHERE kind='meta' AND patch IS NOT NULL
+                          GROUP BY patch ORDER BY n DESC LIMIT 8""")
+    patches.sort(key=lambda r: [int(x) for x in r["patch"].split(".") if x.isdigit()], reverse=True)
+    mine = db.query("SELECT grp, COUNT(*) n FROM history WHERE remake=0 GROUP BY grp")
+    last_game = db.query("SELECT MAX(game_creation) t FROM history")[0]["t"]
+    return {
+        "meta": {"games": meta["n"], "with_details": meta["t"] or 0, "first": meta["first"], "last": meta["last"],
+                 "regions": regions, "patches": patches, "updated": _last("meta")},
+        "mine": {"games": sum(r["n"] for r in mine), "by_queue": {r["grp"]: r["n"] for r in mine},
+                 "last_game": last_game, "updated": _last("sync"), "season_start": config.SEASON_START},
+        "auto": coach.db.kv_get("auto_enabled") != "0",
+        "regions": list(config.META_PLATFORMS),
+    }
+
+
+def _data_where(source: str, region: str, role: str, patch: str):
+    where, args = ["source=?"], ["me" if source == "me" else "meta"]
+    if region:
+        where.append("lower(substr(match_id, 1, instr(match_id, '_') - 1))=?")
+        args.append(region.lower())
+    if role:
+        where.append("position=?")
+        args.append(role)
+    if patch:
+        where.append("patch=?")
+        args.append(patch)
+    return " AND ".join(where), args
+
+
+@app.get("/api/data/champions")
+async def data_champions(source: str = "meta", region: str = "", role: str = "", patch: str = ""):
+    where, args = _data_where(source, region, role, patch)
+    total = coach.db.query(f"SELECT COUNT(DISTINCT match_id) n FROM participants INDEXED BY idx_part_explore WHERE {where}", args)[0]["n"]
+    rows = coach.db.query(
+        f"""SELECT champion_id, COUNT(*) games, SUM(win) wins, AVG(kills) k, AVG(deaths) d, AVG(assists) a,
+                   AVG(cs * 60.0 / duration) cspm, AVG(damage_share) dmg, AVG(kp) kp
+            FROM participants INDEXED BY idx_part_explore WHERE {where} GROUP BY champion_id""", args)
+    for r in rows:
+        r["name"], r["icon"] = coach.dd.champ_name(r["champion_id"]), coach.dd.champ_icon(r["champion_id"])
+        r["winrate"] = r["wins"] / r["games"]
+        r["pickrate"] = r["games"] / total if total else 0
+        r["kda"] = (r["k"] + r["a"]) / max(r["d"], 0.1)
+    return {"total_games": total, "champions": rows}
+
+
+@app.get("/api/data/champion/{cid}")
+async def data_champion(cid: int, source: str = "meta", region: str = "", role: str = "", patch: str = ""):
+    dd = coach.dd
+    where, args = _data_where(source, region, role, patch)
+    rwhere, rargs = _data_where(source, region, "", patch)  # todas as posições
+    roles = coach.db.query(f"""SELECT position, COUNT(*) n, SUM(win) w FROM participants INDEXED BY idx_part_explore
+                               WHERE {rwhere} AND champion_id=? GROUP BY position ORDER BY n DESC""", rargs + [cid])
+    ups = coach.db.query(f"""SELECT opponent_id, COUNT(*) g, SUM(win) w FROM participants INDEXED BY idx_part_explore
+                             WHERE {where} AND champion_id=? AND opponent_id > 0
+                             GROUP BY opponent_id HAVING g >= 5""", args + [cid])
+    for u in ups:
+        u["name"], u["icon"], u["winrate"] = dd.champ_name(u["opponent_id"]), dd.champ_icon(u["opponent_id"]), u["w"] / u["g"]
+    smooth = lambda u: (u["w"] + 5) / (u["g"] + 10)  # suavizado: poucas amostras ficam perto de 50%
+    by_wr = sorted(ups, key=smooth)
+    return {
+        "champion": {"id": cid, "name": dd.champ_name(cid), "icon": dd.champ_icon(cid)},
+        "roles": [{"position": r["position"], "games": r["n"], "winrate": r["w"] / r["n"]} for r in roles if r["position"]],
+        "best": [u for u in by_wr[::-1] if smooth(u) > 0.5][:6], "worst": [u for u in by_wr if smooth(u) < 0.5][:6],
+        "common": sorted(ups, key=lambda u: -u["g"])[:8],
+    }
+
+
 @app.get("/api/champions")
 async def champions():
     return sorted(c["name"] for c in coach.dd.champs.values())
@@ -612,6 +824,7 @@ class SimParams(BaseModel):
     allies: list[SimAlly] = []
     enemies: list[str] = []
     bans: list[str] = []
+    enemy_bans: list[str] = []
 
 
 @app.post("/api/simulate")
@@ -624,6 +837,7 @@ async def simulate(p: SimParams):
         [c for c in (look(e) for e in p.enemies) if c],
         [c for c in (look(b) for b in p.bans) if c],
         p.locked,
+        [c for c in (look(b) for b in p.enemy_bans) if c],
     )
     await coach.handle_session(session)
     return {"ok": True}

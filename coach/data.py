@@ -124,6 +124,58 @@ def participant_rows(match: dict, source: str, only_puuid: str | None = None,
     return rows
 
 
+async def fetch_meta_match(riot: RiotAPI, db: DB, mid: str, timelines: bool) -> int:
+    """Descarrega e guarda um jogo high elo; devolve 1 se ficou guardado como jogo válido."""
+    match = await riot.match(mid)
+    if match and match["info"].get("gameDuration", 0) > 900:
+        timeline = await riot.timeline(mid) if timelines else None
+        extras = timeline_extras(match, timeline) if timeline else None
+        db.save_match(mid, "meta", match["info"]["gameCreation"], patch_of(match),
+                      participant_rows(match, "meta", extras=extras), has_timeline=bool(extras))
+        return 1
+    if match:
+        # jogo curto (remake/FF15): regista-o para não o voltar a descarregar
+        db.save_match(mid, "skip", match["info"]["gameCreation"], patch_of(match), [])
+    return 0
+
+
+async def collect_new_games(riot: RiotAPI, db: DB, target: int, days: int = 30, timelines: bool = True,
+                            progress=None, label: str = "") -> int:
+    """Vai buscar `target` jogos high elo NOVOS (que ainda não estão na base de dados).
+
+    Percorre os jogadores Challenger → Grandmaster → Master por ordem de LP e, em cada volta,
+    vai mais para trás no histórico de cada um (100 jogos de cada vez), até chegar ao objetivo
+    ou não haver mais jogos nos últimos `days` dias. Jogos já guardados nunca são descarregados.
+    """
+    entries = []
+    for tier in ("challenger", "grandmaster", "master"):
+        league = await riot.apex_league(tier)
+        entries += sorted((league or {}).get("entries", []), key=lambda e: e.get("leaguePoints", 0), reverse=True)
+    active = [e["puuid"] for e in entries if e.get("puuid")]
+    since = int(time.time()) - days * 86400
+    seen: set[str] = set()
+    saved, start, page = 0, 0, 100  # 100 IDs por pedido (o máximo da API)
+    if progress:
+        await progress(label, "new games", 0, target)
+    while active and saved < target:
+        still = []
+        for puuid in active:
+            ids = await riot.match_ids(puuid, queue=420, start=start, count=page, start_time=since)
+            if len(ids) == page:
+                still.append(puuid)  # este jogador ainda tem jogos mais antigos para a próxima volta
+            for mid in ids:
+                if mid in seen or db.has_match(mid):
+                    continue
+                seen.add(mid)
+                saved += await fetch_meta_match(riot, db, mid, timelines)
+                if progress:
+                    await progress(label, "new games", saved, target)
+                if saved >= target:
+                    return saved
+        active, start = still, start + page
+    return saved
+
+
 async def crawl_meta(riot: RiotAPI, db: DB, tiers=("challenger", "grandmaster"), players: int = 60,
                      per_player: int = 15, days: int = 14, timelines: bool = True, backfill: int = 300,
                      progress=None, label: str = "") -> int:
@@ -149,16 +201,7 @@ async def crawl_meta(riot: RiotAPI, db: DB, tiers=("challenger", "grandmaster"),
     new = [m for m in dict.fromkeys(match_ids) if not db.has_match(m)]
     saved = 0
     for i, mid in enumerate(new, 1):
-        match = await riot.match(mid)
-        if match and match["info"].get("gameDuration", 0) > 900:
-            timeline = await riot.timeline(mid) if timelines else None
-            extras = timeline_extras(match, timeline) if timeline else None
-            db.save_match(mid, "meta", match["info"]["gameCreation"], patch_of(match),
-                          participant_rows(match, "meta", extras=extras), has_timeline=bool(extras))
-            saved += 1
-        elif match:
-            # jogo curto (remake/FF15): regista-o para não o voltar a descarregar
-            db.save_match(mid, "skip", match["info"]["gameCreation"], patch_of(match), [])
+        saved += await fetch_meta_match(riot, db, mid, timelines)
         if progress:
             await progress(label, "games", i, len(new))
 
