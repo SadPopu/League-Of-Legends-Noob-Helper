@@ -35,15 +35,16 @@ CREATE INDEX IF NOT EXISTS idx_part_explore ON participants(source, position, pa
 -- para "boneco X contra cada inimigo": começa nos jogos do inimigo e salta para os adversários pelo match_id
 CREATE INDEX IF NOT EXISTS idx_part_bychamp ON participants(champion_id, source, position, match_id, win);
 CREATE INDEX IF NOT EXISTS idx_part_bymatch ON participants(match_id, win, source, position, champion_id);
-CREATE TABLE IF NOT EXISTS history (
-    match_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS history (    -- os teus jogos, de cada conta tua (puuid)
+    match_id TEXT NOT NULL,
+    puuid TEXT NOT NULL,
     grp TEXT,                        -- solo / flex / normal / aram / other
     queue_id INTEGER, game_creation INTEGER, duration INTEGER, remake INTEGER,
     win INTEGER, champion_id INTEGER, kills INTEGER, deaths INTEGER, assists INTEGER,
     cs INTEGER, gold INTEGER, damage INTEGER, vision INTEGER, kp REAL, score REAL, badge TEXT,
-    data TEXT                        -- resumo do jogo com os 10 jogadores (json)
+    data TEXT,                       -- resumo do jogo com os 10 jogadores (json)
+    PRIMARY KEY (match_id, puuid)
 );
-CREATE INDEX IF NOT EXISTS idx_history_grp ON history(grp, game_creation);
 CREATE TABLE IF NOT EXISTS mains (
     puuid TEXT NOT NULL,
     champion_id INTEGER NOT NULL,
@@ -67,9 +68,11 @@ CREATE TABLE IF NOT EXISTS lp_history (   -- o teu rank sempre que a app o vê m
     PRIMARY KEY (puuid, queue, ts)
 );
 CREATE TABLE IF NOT EXISTS postgame (
-    match_id TEXT PRIMARY KEY,
+    match_id TEXT NOT NULL,
+    puuid TEXT NOT NULL,
     created INTEGER,
-    report TEXT
+    report TEXT,
+    PRIMARY KEY (match_id, puuid)
 );
 """
 
@@ -93,6 +96,41 @@ class DB:
                 if col not in existing:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         self.conn.commit()
+        self._per_account()
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_history_grp ON history(puuid, grp, game_creation)")
+        self.conn.commit()
+        # conta ativa: as tuas estatísticas, histórico e relatórios são só os desta conta
+        self.me_puuid: str | None = None
+
+    def _per_account(self):
+        """Bases de dados antigas: histórico e relatórios eram de uma só conta (sem puuid).
+        Descobre de quem é cada jogo pelos dados do próprio jogo e passa para o formato por conta."""
+        if "puuid" in {r["name"] for r in self.conn.execute("PRAGMA table_info(history)")}:
+            return
+        with self.conn:  # tudo numa só transação: ou migra tudo ou nada
+            self.conn.execute("BEGIN")
+            self.conn.execute("DROP INDEX IF EXISTS idx_history_grp")
+            for table in ("history", "postgame"):
+                self.conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+            for stmt in SCHEMA.split(";"):  # recria as tabelas que faltam (já no formato novo)
+                if stmt.strip():
+                    self.conn.execute(stmt)
+            owner = {}
+            for r in self.conn.execute("SELECT * FROM history_old").fetchall():
+                me = next((p for p in json.loads(r["data"])["players"]
+                           if p["champion_id"] == r["champion_id"] and p["kills"] == r["kills"]
+                           and p["deaths"] == r["deaths"] and p["assists"] == r["assists"]), None)
+                if not me:
+                    continue
+                owner[r["match_id"]] = me["puuid"]
+                self.conn.execute(f"INSERT INTO history VALUES ({','.join('?' * 20)})",
+                                  (r["match_id"], me["puuid"], *tuple(r)[1:]))
+            for r in self.conn.execute("SELECT * FROM postgame_old").fetchall():
+                if r["match_id"] in owner:
+                    self.conn.execute("INSERT INTO postgame VALUES (?,?,?,?)",
+                                      (r["match_id"], owner[r["match_id"]], r["created"], r["report"]))
+            self.conn.execute("DROP TABLE history_old")
+            self.conn.execute("DROP TABLE postgame_old")
 
     def has_match(self, match_id: str, kind: str | None = None) -> bool:
         q = "SELECT 1 FROM matches WHERE match_id=?" + (" AND kind=?" if kind else "")
@@ -180,22 +218,23 @@ class DB:
         with self.conn:
             self.conn.execute("INSERT OR REPLACE INTO accounts VALUES (?,?)", (puuid, name))
 
-    # --- histórico ---
-    def has_history(self, match_id: str) -> bool:
-        return self.conn.execute("SELECT 1 FROM history WHERE match_id=?", (match_id,)).fetchone() is not None
+    # --- histórico (por conta: os teus jogos são os da conta ativa, me_puuid) ---
+    def has_history(self, match_id: str, puuid: str) -> bool:
+        return self.conn.execute("SELECT 1 FROM history WHERE match_id=? AND puuid=?",
+                                 (match_id, puuid)).fetchone() is not None
 
     def save_history(self, summary: dict, me: dict, grp: str):
         with self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (summary["match_id"], grp, summary["queue_id"], summary["game_creation"], summary["duration"],
-                 int(summary["remake"]), int(me["win"]), me["champion_id"], me["kills"], me["deaths"],
-                 me["assists"], me["cs"], me["gold"], me["damage"], me["vision"], me["kp"],
+                "INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (summary["match_id"], me["puuid"], grp, summary["queue_id"], summary["game_creation"],
+                 summary["duration"], int(summary["remake"]), int(me["win"]), me["champion_id"], me["kills"],
+                 me["deaths"], me["assists"], me["cs"], me["gold"], me["damage"], me["vision"], me["kp"],
                  me.get("score"), me.get("badge"), json.dumps(summary)),
             )
 
     def history_detail(self, match_id: str) -> dict | None:
-        r = self.conn.execute("SELECT data FROM history WHERE match_id=?", (match_id,)).fetchone()
+        r = self.conn.execute("SELECT data FROM history WHERE match_id=? LIMIT 1", (match_id,)).fetchone()
         return json.loads(r["data"]) if r else None
 
     def save_rank(self, puuid: str, entry: dict, ts: int):
@@ -210,26 +249,39 @@ class DB:
             self.conn.execute("INSERT OR REPLACE INTO lp_history VALUES (?,?,?,?,?,?,?,?)",
                               (puuid, entry["queueType"], ts, *row))
 
-    def wipe_personal(self):
-        """Apaga tudo o que é da tua conta (jogos, histórico, relatórios, LP, maestrias).
-        Os jogos high elo e os mains ficam."""
+    def adopt_puuid(self, name: str, puuid: str):
+        """O PUUID que a API devolve depende da chave (dev key / personal key dão PUUIDs diferentes).
+        Se esta conta já tem jogos guardados com outro PUUID, passa-os para o novo."""
+        pattern = json.dumps({"name": name})[1:-1]  # '"name": "Nome#TAG"', como fica no json do jogo
+        old = None
+        for r in self.conn.execute("SELECT data FROM history WHERE data LIKE ? AND puuid != ? LIMIT 20",
+                                   (f"%{pattern}%", puuid)):
+            p = next((p for p in json.loads(r["data"])["players"] if p["name"].lower() == name.lower()), None)
+            if p and p["puuid"] != puuid:
+                old = p["puuid"]
+                break
+        if not old or not self.conn.execute("SELECT 1 FROM history WHERE puuid=?", (old,)).fetchone():
+            return
         with self.conn:
-            self.conn.execute("DELETE FROM participants WHERE source='me'")
-            self.conn.execute("DELETE FROM matches WHERE kind='me'")
-            for table in ("history", "postgame", "lp_history"):
-                self.conn.execute(f"DELETE FROM {table}")
-            self.conn.execute("DELETE FROM kv WHERE key IN ('my_mastery', 'last_job:sync', 'auto:sync')")
+            for table, extra in (("history", ""), ("postgame", ""), ("lp_history", ""),
+                                 ("participants", " AND source='me'")):
+                self.conn.execute(f"UPDATE OR REPLACE {table} SET puuid=? WHERE puuid=?{extra}", (puuid, old))
+            # o json de cada jogo também tem o PUUID (é assim que se sabe qual dos 10 és tu)
+            self.conn.execute("UPDATE history SET data=replace(data, ?, ?)", (old, puuid))
+            self.conn.execute("UPDATE postgame SET report=replace(report, ?, ?)", (old, puuid))
+        return old
 
-    def save_postgame(self, match_id: str, report: dict):
+    def save_postgame(self, match_id: str, puuid: str, report: dict):
         with self.conn:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO postgame VALUES (?,?,?)", (match_id, int(time.time()), json.dumps(report))
-            )
+            self.conn.execute("INSERT OR REPLACE INTO postgame VALUES (?,?,?,?)",
+                              (match_id, puuid, int(time.time()), json.dumps(report)))
 
     def postgames(self, limit: int = 20) -> list[dict]:
-        rows = self.conn.execute("SELECT report FROM postgame ORDER BY created DESC LIMIT ?", (limit,))
+        rows = self.conn.execute("SELECT report FROM postgame WHERE puuid=? ORDER BY created DESC LIMIT ?",
+                                 (self.me_puuid, limit))
         return [json.loads(r["report"]) for r in rows]
 
     def postgame(self, match_id: str) -> dict | None:
-        r = self.conn.execute("SELECT report FROM postgame WHERE match_id=?", (match_id,)).fetchone()
+        r = self.conn.execute("SELECT report FROM postgame WHERE match_id=? AND puuid=?",
+                              (match_id, self.me_puuid)).fetchone()
         return json.loads(r["report"]) if r else None

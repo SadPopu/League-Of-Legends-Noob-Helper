@@ -44,8 +44,8 @@ def lp_series(db: DB, puuid: str, queue: str) -> dict:
         s["v"] = total_lp(s["tier"], s["division"], s["lp"])
     games = db.query(
         """SELECT game_creation + duration * 1000 AS t, win, champion_id FROM history
-           WHERE grp=? AND remake=0 AND game_creation >= ? ORDER BY t""",
-        (queue, season_start_ts() * 1000))
+           WHERE puuid=? AND grp=? AND remake=0 AND game_creation >= ? ORDER BY t""",
+        (puuid, queue, season_start_ts() * 1000))
 
     # ganho/perda típico: pares de registos separados por um único jogo
     gains, losses = [], []

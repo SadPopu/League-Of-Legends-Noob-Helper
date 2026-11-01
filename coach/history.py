@@ -129,7 +129,7 @@ async def sync_history(riot: RiotAPI, db: DB, puuid: str, progress=None) -> int:
         if len(batch) < 100:
             break
         start += 100
-    new = [m for m in ids if not db.has_history(m)]
+    new = [m for m in ids if not db.has_history(m, puuid)]
     for i, mid in enumerate(new, 1):
         match = await riot.match(mid)
         if match:
@@ -148,6 +148,7 @@ def store_match(db: DB, match: dict, puuid: str):
     db.save_history(summary, me, queue_group(summary["queue_id"]))
     info = match["info"]
     mid = summary["match_id"]
-    if (info.get("queueId") in RANKED_QUEUES and not summary["remake"] and not db.has_match(mid, "me")):
+    known = db.query("SELECT 1 FROM participants WHERE match_id=? AND puuid=? AND source='me'", (mid, puuid))
+    if info.get("queueId") in RANKED_QUEUES and not summary["remake"] and not known:
         db.save_match(mid, "me", info["gameCreation"], patch_of(match),
                       participant_rows(match, "me", only_puuid=puuid))

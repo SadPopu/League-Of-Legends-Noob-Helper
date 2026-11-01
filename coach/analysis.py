@@ -29,14 +29,14 @@ def wr(wins: float, games: float) -> float:
 
 # ---------------------------------------------------------------- estatísticas
 def my_champion_stats(db: DB, position: str | None = None) -> list[dict]:
-    where = "source='me'" + (" AND position=?" if position else "")
+    where = "source='me' AND puuid=?" + (" AND position=?" if position else "")
     rows = db.query(
         f"""SELECT champion_id, COUNT(*) games, SUM(win) wins,
                    AVG(kills) k, AVG(deaths) d, AVG(assists) a,
                    AVG(cs*60.0/duration) cspm, AVG(vision*60.0/duration) vspm,
                    AVG(damage_share) dmg_share, AVG(kp) kp, MAX(game_creation) last_played
             FROM participants WHERE {where} GROUP BY champion_id ORDER BY games DESC""",
-        (position,) if position else (),
+        (db.me_puuid, position) if position else (db.me_puuid,),
     )
     for r in rows:
         r["winrate"] = wr(r["wins"], r["games"])
@@ -47,6 +47,9 @@ def my_champion_stats(db: DB, position: str | None = None) -> list[dict]:
 def matchup(db: DB, source: str, champ: int, opp: int, position: str | None = None) -> tuple[int, float]:
     sql = "SELECT COUNT(*) g, SUM(win) w FROM participants WHERE source=? AND champion_id=? AND opponent_id=?"
     args = [source, champ, opp]
+    if source == "me":  # só os jogos da conta ativa
+        sql += " AND puuid=?"
+        args.append(db.me_puuid)
     if position:
         sql += " AND position=?"
         args.append(position)

@@ -90,24 +90,22 @@ class Coach:
             acc = await self.riot.account_by_riot_id(name, tag)
             if acc:
                 self.me = {"puuid": acc["puuid"], "name": f"{acc['gameName']}#{acc['tagLine']}"}
-                self.check_owner()
+                self.switch_account()
         except RiotAPIError as e:
             log.warning("Could not fetch the account: %s", e)
 
-    def check_owner(self):
-        """Os teus dados (histórico, stats, LP) são de uma só conta. Se a conta mudou, apaga os da
-        anterior e vai buscar os da nova. Só conta como outra conta se mudarem o PUUID *e* o nome:
-        mudar só o nome (rename) ou só o PUUID (nova chave da API) é a mesma pessoa."""
-        owner = json.loads(self.db.kv_get("owner") or "{}")
-        me = self.me
-        if owner and owner["puuid"] != me["puuid"] and owner["name"].lower() != me["name"].lower():
-            log.info("Account changed from %s to %s: deleting the old account's data", owner["name"], me["name"])
-            self.db.wipe_personal()
-            self.profile = {}
-            self.db.kv_set("owner", json.dumps(me))
+    def switch_account(self):
+        """Os dados de cada conta ficam guardados à parte; a app mostra só os da conta ativa.
+        Uma conta sem jogos guardados (nova na app) vai buscá-los logo."""
+        puuid = self.me["puuid"]
+        old = self.db.adopt_puuid(self.me["name"], puuid)
+        if old:
+            log.info("%s: games moved to the PUUID of the new API key", self.me["name"])
+        self.db.me_puuid = puuid
+        self.profile = {}
+        if not self.db.query("SELECT 1 FROM history WHERE puuid=? LIMIT 1", (puuid,)):
+            log.info("%s has no games saved yet: fetching them", self.me["name"])
             start_sync_job()
-        elif owner != me:
-            self.db.kv_set("owner", json.dumps(me))
 
     # ---------------------------------------------------------------- LCU
     async def on_lcu_status(self, connected: bool):
@@ -247,7 +245,7 @@ class Coach:
         match = match or await self.riot.match(match_id)
         if not match or self.me["puuid"] not in match["metadata"]["participants"]:
             return None
-        known = self.db.has_history(match_id)
+        known = self.db.has_history(match_id, self.me["puuid"])
         store_match(self.db, match, self.me["puuid"])  # histórico (todas as filas)
         if not known:
             await self.refresh_profile(force=True)
@@ -256,7 +254,7 @@ class Coach:
             return None
         timeline = await self.riot.timeline(match_id)
         report = await asyncio.to_thread(analyse_match, match, timeline, self.me["puuid"], self.db, self.dd)
-        self.db.save_postgame(match_id, report)
+        self.db.save_postgame(match_id, self.me["puuid"], report)
         await self.send({"type": "postgame", "report": report}, remember=False)
         return report
 
@@ -479,7 +477,7 @@ async def sync():
 
 # ---------------------------------------------------------------- histórico
 def _history_where(group: str, champion: int | None):
-    where, args = ["remake=0"], []
+    where, args = ["puuid=?", "remake=0"], [coach.me.get("puuid")]
     if group in QUEUE_GROUPS or group == "other":
         where.append("grp=?")
         args.append(group)
@@ -538,7 +536,7 @@ async def history(group: str = "all", offset: int = 0, limit: int = 20, champion
                    AVG(kp) kp, AVG(score) score, SUM(badge='MVP') mvp, SUM(badge='ACE') ace
             FROM history WHERE {where}""", args)[0]
     counts = {r["grp"]: r["n"] for r in coach.db.query(
-        "SELECT grp, COUNT(*) n FROM history WHERE remake=0 GROUP BY grp")}
+        "SELECT grp, COUNT(*) n FROM history WHERE puuid=? AND remake=0 GROUP BY grp", (coach.me.get("puuid"),))}
     top = coach.db.query(
         f"""SELECT champion_id, COUNT(*) g, SUM(win) w, AVG(kills) k, AVG(deaths) d, AVG(assists) a
             FROM history WHERE {where} GROUP BY champion_id ORDER BY g DESC LIMIT 5""", args)
@@ -760,8 +758,9 @@ async def data_overview():
     patches = db.query("""SELECT patch, COUNT(*) n FROM matches WHERE kind='meta' AND patch IS NOT NULL
                           GROUP BY patch ORDER BY n DESC LIMIT 8""")
     patches.sort(key=lambda r: [int(x) for x in r["patch"].split(".") if x.isdigit()], reverse=True)
-    mine = db.query("SELECT grp, COUNT(*) n FROM history WHERE remake=0 GROUP BY grp")
-    last_game = db.query("SELECT MAX(game_creation) t FROM history")[0]["t"]
+    me = (coach.me.get("puuid"),)
+    mine = db.query("SELECT grp, COUNT(*) n FROM history WHERE puuid=? AND remake=0 GROUP BY grp", me)
+    last_game = db.query("SELECT MAX(game_creation) t FROM history WHERE puuid=?", me)[0]["t"]
     return {
         "meta": {"games": meta["n"], "with_details": meta["t"] or 0, "first": meta["first"], "last": meta["last"],
                  "regions": regions, "patches": patches, "updated": _last("meta")},
@@ -774,6 +773,9 @@ async def data_overview():
 
 def _data_where(source: str, region: str, role: str, patch: str):
     where, args = ["source=?"], ["me" if source == "me" else "meta"]
+    if source == "me":  # só os jogos da conta ativa
+        where.append("puuid=?")
+        args.append(coach.me.get("puuid"))
     if region:
         where.append("lower(substr(match_id, 1, instr(match_id, '_') - 1))=?")
         args.append(region.lower())
