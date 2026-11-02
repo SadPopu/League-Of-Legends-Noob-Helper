@@ -48,9 +48,7 @@ function handle(msg) {
     case "mains_updated":
       if (isActive("mains") && mainsState.selected === msg.champion) openMains(msg.champion, true);
       return;
-    case "ingame":
-      $("#cs-ingame").hidden = false;
-      return;
+    case "ingame": return showIngame();
     case "champselect_end": return resetChampSelect();
     case "history_updated":
       if (isActive("profile")) { loadProfile(); loadHistory(true); }
@@ -178,6 +176,18 @@ function renderChampSelect(cs) {
   }
   if (cs.locked && !csWasLocked) setCenter("build");
   csWasLocked = cs.locked;
+}
+
+// jogo a começar: atalho para os mains do boneco que escolheste
+function showIngame() {
+  const champ = csLast?.allies.find((a) => a.me)?.champion;
+  const btn = $("#ingame-mains");
+  btn.hidden = !champ;
+  if (champ) {
+    btn.textContent = `★ See ${champ.name} mains`;
+    btn.onclick = () => { showTab("mains"); openMains(champ.id); };
+  }
+  $("#cs-ingame").hidden = false;
 }
 
 function resetChampSelect() {

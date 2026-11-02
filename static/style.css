@@ -190,7 +190,8 @@ tbody tr:hover { background: rgba(200, 170, 110, .04); }
 .fit b { display: block; font-size: 18px; color: var(--gold-2); font-family: Cinzel, serif; }
 .fit small { color: var(--muted); font-size: 11px; }
 
-.ingame-banner { background: rgba(76, 191, 134, .1); border: 1px solid rgba(76, 191, 134, .35); color: var(--good); padding: 8px 12px; border-radius: 8px; margin-bottom: 14px; font-weight: 600; }
+.ingame-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; background: rgba(76, 191, 134, .1); border: 1px solid rgba(76, 191, 134, .35); color: var(--good); padding: 8px 12px; border-radius: 8px; margin-bottom: 14px; font-weight: 600; }
+.ingame-banner[hidden] { display: none; }
 
 /* build */
 .matchup { display: flex; align-items: center; gap: 10px; background: var(--panel-2); padding: 10px; border-radius: 8px; border: 1px solid var(--border); }

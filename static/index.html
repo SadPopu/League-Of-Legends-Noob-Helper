@@ -6,7 +6,7 @@
   <title>Noob Helper</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="/static/style.css?v=18">
+  <link rel="stylesheet" href="/static/style.css?v=19">
 </head>
 <body data-tab="cs">
 <header class="topbar">
@@ -29,7 +29,10 @@
 <main>
   <!-- CHAMP SELECT -->
   <section id="tab-cs" class="tab active">
-    <div id="cs-ingame" class="ingame-banner" hidden>● Game in progress: your champ select build and tips stay here until the game ends.</div>
+    <div id="cs-ingame" class="ingame-banner" hidden>
+      <span>● Game in progress: your champ select build and tips stay here until the game ends.</span>
+      <button id="ingame-mains" class="secondary" hidden></button>
+    </div>
     <div class="cs-layout">
       <aside class="cs-side ally">
         <h3 class="side-title">Your team</h3>
@@ -237,6 +240,6 @@
   <datalist id="champ-list"></datalist>
 </div>
 
-<script src="/static/app.js?v=18"></script>
+<script src="/static/app.js?v=19"></script>
 </body>
 </html>
