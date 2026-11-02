@@ -423,6 +423,9 @@ def timeline_build(rows: list[dict], dd: DDragon, pos: str | None) -> dict:
 MIN_POOL_GAMES = 3     # mínimo de jogos teus para um boneco entrar no "My champs"
 PRIOR_MINE = 10        # jogos fictícios a 50% no teu winrate com o boneco
 PRIOR_META = 20        # idem para amostras high elo
+# counters: um boneco é desta posição se for a sua posição habitual (40%+ dos jogos dele, 0,3%+ dos jogos da posição)
+# ou se for comum nela mesmo sendo flex (15%+ dos jogos dele, 1%+ dos jogos da posição)
+ROLE_RULES = ((0.40, 0.003), (0.15, 0.01))
 PRIOR_MY_MATCHUP = 4   # idem para os teus jogos contra o adversário de lane
 
 
@@ -489,6 +492,22 @@ def enemy_matchups(db: DB, dd: DDragon, pos: str | None, lane_opp: int | None,
 
 
 # ---------------------------------------------------------------- counters (high elo)
+def role_pool(db: DB, pos: str | None) -> list[dict]:
+    """Bonecos que se jogam mesmo nesta posição em high elo. Picks raros fora de role (Kindred ADC)
+    ficam de fora: são poucos jogos, muitas vezes de especialistas, e o winrate deles engana."""
+    pool = db.query(
+        """SELECT champion_id, COUNT(*) g, SUM(win) w FROM participants INDEXED BY idx_part_explore
+           WHERE source='meta' AND (? IS NULL OR position=?) GROUP BY champion_id HAVING g >= 15""", (pos, pos))
+    if not pos:
+        return pool
+    total = {r["champion_id"]: r["g"] for r in db.query(
+        """SELECT champion_id, COUNT(*) g FROM participants INDEXED BY idx_part_explore
+           WHERE source='meta' GROUP BY champion_id""")}
+    role_games = sum(r["g"] for r in pool)
+    return [r for r in pool if any(r["g"] / total[r["champion_id"]] >= share and r["g"] / role_games >= pick
+                                   for share, pick in ROLE_RULES)]
+
+
 def recommend_counters(state: ChampSelectState, db: DB, dd: DDragon, limit: int = 8) -> dict:
     """Bonecos com melhor winrate em high elo contra a equipa inimiga atual (na tua posição).
 
@@ -500,9 +519,7 @@ def recommend_counters(state: ChampSelectState, db: DB, dd: DDragon, limit: int 
     lane_opp = enemy_roles.get(pos) if pos else None
     unavailable = state.unavailable()
 
-    pool = db.query(
-        """SELECT champion_id, COUNT(*) g, SUM(win) w FROM participants INDEXED BY idx_part_explore
-           WHERE source='meta' AND (? IS NULL OR position=?) GROUP BY champion_id HAVING g >= 15""", (pos, pos))
+    pool = role_pool(db, pos)
     if not pool:
         return {"position": pos, "lane_opponent": None, "candidates": []}
 
