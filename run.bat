@@ -21,7 +21,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 rem --- dependencies: install them if any is missing
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, httpx, websockets, psutil, dotenv" >nul 2>&1
+".venv\Scripts\python.exe" -c "import fastapi, uvicorn, httpx, websockets, psutil, dotenv, pystray, PIL" >nul 2>&1
 if errorlevel 1 (
     echo Installing dependencies...
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
@@ -36,12 +36,8 @@ if not exist .env (
     exit /b 0
 )
 
-echo Starting Noob Helper on http://127.0.0.1:8765 ...
-start "" http://127.0.0.1:8765
-".venv\Scripts\python.exe" -m uvicorn coach.main:app --host 127.0.0.1 --port 8765
-echo.
-echo The app stopped. If this was not on purpose, read the messages above.
-pause
+rem --- no terminal window: the app lives in the tray icon (bottom right), its messages go to the data folder (noob-helper.log)
+start "" ".venv\Scripts\pythonw.exe" -m coach.tray
 exit /b 0
 
 :fail

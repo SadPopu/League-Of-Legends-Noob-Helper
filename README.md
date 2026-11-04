@@ -33,7 +33,7 @@ Everything is calculated locally from the Riot API. No paid services.
 3. Double-click `run.bat`. The first time it creates the Python environment and opens `.env` so you can fill in:
    - `RIOT_API_KEY=RGAPI-...`
    - `RIOT_ID=YourName#TAG`
-4. Run `run.bat` again. The browser opens at <http://127.0.0.1:8765>.
+4. Run `run.bat` again. The browser opens at <http://127.0.0.1:8765> and the app keeps running in the background, with an icon in the Windows tray (bottom right, it may be under the `^` arrow). Click it to open the app; right-click it to quit. Running `run.bat` while the app is open just opens the browser.
 5. In the **My data** tab:
    - click **Sync season** to fetch all your games;
    - click **Collect** under "High elo data", with EUW and KR ticked. It takes a while because of the key's request limit; run it again from time to time, especially after a patch.
