@@ -584,6 +584,14 @@ function renderHistSummary({ summary: s, top_champions: top }) {
     </div>`;
 }
 
+function lpTag(lp) {
+  if (!lp) return "";
+  const text = `${lp.lp > 0 ? "+" : ""}${lp.lp} LP`;
+  return lp.exact
+    ? ` <span class="g-lp" title="Measured: your rank was recorded before and after this game">${text}</span>`
+    : ` <span class="g-lp estimated" title="Estimate: your usual gain/loss in this queue. Riot doesn't share LP per game, and the app wasn't recording your rank around this game">≈${text}</span>`;
+}
+
 function gameRow(g) {
   const m = g.me;
   const kda = (m.kills + m.assists) / Math.max(m.deaths, 1);
@@ -593,7 +601,7 @@ function gameRow(g) {
       <div class="g-meta">
         <strong>${esc(g.queue)}</strong>
         <small>${ago(g.game_creation)}</small>
-        <span class="${m.win ? "good" : "bad"}">${m.placement ? `#${m.placement}` : m.win ? "Victory" : "Defeat"}</span>
+        <span class="${m.win ? "good" : "bad"}">${m.placement ? `#${m.placement}` : m.win ? "Victory" : "Defeat"}${lpTag(g.lp)}</span>
         <small>${mins(g.duration)}${g.has_report ? ` · <span class="analysed">analysed</span>` : ""}</small>
       </div>
       <div class="g-champ">
@@ -1128,6 +1136,12 @@ function drawJungle(id, team) {
   el.querySelector("svg").innerHTML = jungleSvg(JG_MAPS[id][team]);
 }
 
+// % de jogos em que comprou cada par (no máximo os 3 mais comprados)
+function bootsShares(b) {
+  const rows = (b.boots_usage?.rows || []).filter((x) => x.icon).slice(0, 3);
+  return rows.length ? `<div class="compare-boots">${rows.map((x) => `<span title="${esc(x.name)}: ${x.games} games · ${pct(x.winrate)} WR">${icon(x, "ico small")}${pct(x.pick_rate)}</span>`).join("")}</div>` : "";
+}
+
 function compareMains(rep) {
   const ms = rep.mains.filter((m) => m.games);
   const runes = (b) => b.runes ? `${b.runes.perk_ids.slice(0, 6).map((pid) => {
@@ -1144,6 +1158,7 @@ function compareMains(rep) {
       ${row("Start items", (b) => b.timeline?.start_items ? b.timeline.start_items.items.map((it) => icon(it, "ico small")).join("") : "–")}
       ${row("1st → 3rd item", (b) => b.timeline?.item_path ? b.timeline.item_path.items.map((it) => icon(it, "ico small")).join("›") : "–")}
       ${ms.some((m) => m.build.quest_items?.length) ? row("Quest item", (b) => b.quest_items?.map((it) => icon(it, "ico small")).join("") || "–") : ""}
+      ${row("Boots", (b) => bootsShares(b) || "–")}
       ${row("Most used items", (b, m) => m.items.map((it) => icon(it, "ico small")).join("") || "–")}
     </tbody></table></div>`;
 }

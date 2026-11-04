@@ -33,6 +33,50 @@ def rank_view(entry: dict | None) -> dict | None:
             "total": total_lp(entry["tier"], entry["rank"], entry["leaguePoints"])}
 
 
+def _one_game_gaps(snaps: list[dict]):
+    """Pares de registos seguidos separados por um único jogo: (registo antes, registo depois, ganhou, LP)."""
+    for a, b in zip(snaps, snaps[1:]):
+        dw, dl = b["wins"] - a["wins"], b["losses"] - a["losses"]
+        if dw + dl == 1 and abs(b["v"] - a["v"]) < 60:  # mais do que isto é um dodge pelo meio
+            yield a, b, bool(dw), b["v"] - a["v"]
+
+
+def _typical_lp(snaps: list[dict]) -> tuple[int | None, int | None]:
+    """Ganho e perda típicos observados nos registos (None se ainda não houver nenhum)."""
+    gains = [lp for *_, won, lp in _one_game_gaps(snaps) if won]
+    losses = [lp for *_, won, lp in _one_game_gaps(snaps) if not won]
+    return round(median(gains)) if gains else None, round(median(losses)) if losses else None
+
+
+def game_lp(db: DB, puuid: str) -> dict[str, dict]:
+    """LP ganhos/perdidos por jogo: {match_id: {"lp", "exact"}}.
+
+    Exato quando há um registo do rank antes e depois desse jogo; os outros jogos ficam com o ganho/perda
+    típico da fila. Sem nada observado na fila, os jogos ficam de fora em vez de mostrarem um valor inventado.
+    """
+    result = {}
+    for queue, queue_type in QUEUES.items():
+        snaps = db.query(
+            "SELECT ts, tier, division, lp, wins, losses FROM lp_history WHERE puuid=? AND queue=? ORDER BY ts",
+            (puuid, queue_type))
+        for s in snaps:
+            s["v"] = total_lp(s["tier"], s["division"], s["lp"])
+        games = db.query(
+            """SELECT match_id, game_creation + duration * 1000 AS t, win FROM history
+               WHERE puuid=? AND grp=? AND remake=0 AND game_creation >= ?""",
+            (puuid, queue, season_start_ts() * 1000))
+        gain, loss = _typical_lp(snaps)
+        for g in games:
+            typical = gain if g["win"] else loss
+            if typical is not None:
+                result[g["match_id"]] = {"lp": typical, "exact": False}
+        for a, b, won, lp in _one_game_gaps(snaps):
+            between = [g for g in games if a["ts"] < g["t"] <= b["ts"]]
+            if len(between) == 1 and bool(between[0]["win"]) == won:
+                result[between[0]["match_id"]] = {"lp": lp, "exact": True}
+    return result
+
+
 def lp_series(db: DB, puuid: str, queue: str) -> dict:
     """Pontos (tempo, LP total) desde o início da season: exatos onde há registos, estimados no resto."""
     snaps = db.query(
@@ -47,14 +91,9 @@ def lp_series(db: DB, puuid: str, queue: str) -> dict:
            WHERE puuid=? AND grp=? AND remake=0 AND game_creation >= ? ORDER BY t""",
         (puuid, queue, season_start_ts() * 1000))
 
-    # ganho/perda típico: pares de registos separados por um único jogo
-    gains, losses = [], []
-    for a, b in zip(snaps, snaps[1:]):
-        dw, dl = b["wins"] - a["wins"], b["losses"] - a["losses"]
-        if dw + dl == 1 and abs(b["v"] - a["v"]) < 60:
-            (gains if dw else losses).append(b["v"] - a["v"])
-    gain = round(median(gains)) if gains else DEFAULT_GAIN
-    loss = round(median(losses)) if losses else DEFAULT_LOSS
+    gain, loss = _typical_lp(snaps)
+    gain = DEFAULT_GAIN if gain is None else gain
+    loss = DEFAULT_LOSS if loss is None else loss
     delta = lambda g: gain if g["win"] else loss
 
     last = snaps[-1]

@@ -333,9 +333,37 @@ def quest_items(rows: list[dict], dd: DDragon) -> list[dict]:
             for iid, n in counts.most_common() if n / total >= 0.05]
 
 
+BASIC_BOOTS, NO_BOOTS = 1001, 0
+
+
+def boots_usage(rows: list[dict], dd: DDragon) -> dict | None:
+    """% de jogos em que cada par de botas foi comprado, juntando as compras (botas vendidas antes do fim
+    contam) aos itens do fim do jogo (as melhorias não aparecem nas compras). Um jogo conta em todos os pares
+    que teve. As melhorias contam no par de origem."""
+    rows = [r for r in rows if r.get("purchases")]  # sem compras não dá para saber se as botas foram vendidas
+    if not rows:
+        return None
+    games, wins = Counter(), Counter()
+    for r in rows:
+        owned = {i for i in (*r["items"], *(p[0] for p in r["purchases"])) if dd.is_boots(i)}
+        bases = {dd.boots_base(i) for i in owned} - {None} or {BASIC_BOOTS if owned else NO_BOOTS}
+        for base in bases:
+            games[base] += 1
+            wins[base] += r["win"]
+
+    def row(iid: int, n: int) -> dict:
+        return {"id": iid, "name": "No boots" if iid == NO_BOOTS else "Only basic Boots" if iid == BASIC_BOOTS else dd.item_name(iid),
+                "icon": dd.item_icon(iid) if iid else None, "games": n, "pick_rate": n / len(rows), "winrate": wr(wins[iid], n)}
+
+    # as linhas especiais ficam sempre no fim
+    order = sorted(games.items(), key=lambda g: (g[0] in (BASIC_BOOTS, NO_BOOTS), -g[1]))
+    return {"sample": len(rows), "rows": [row(iid, n) for iid, n in order]}
+
+
 def aggregate_build(rows: list[dict], dd: DDragon, pos: str | None = None) -> dict:
     """Runas, feitiços, skills e ordem de itens mais comuns num conjunto de jogos."""
-    out = {"sample": len(rows), "runes": None, "spells": None, "timeline": None, "quest_items": quest_items(rows, dd)}
+    out = {"sample": len(rows), "runes": None, "spells": None, "timeline": None, "quest_items": quest_items(rows, dd),
+           "boots_usage": boots_usage(rows, dd)}
     if not rows:
         return out
     page = _most_common(rows, lambda r: (r["primary_style"], r["sub_style"], tuple(r["perks"][:6])))

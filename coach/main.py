@@ -21,7 +21,7 @@ from .ddragon import DDragon
 from .lcu import LCU
 from .mains import crawl_mastery, ensure_names, games_stale, mains_report, refresh_main_games, top_mains
 from .postgame import analyse_match
-from .profile import QUEUES, lp_series, rank_view
+from .profile import QUEUES, game_lp, lp_series, rank_view
 from .riot_api import RiotAPI, RiotAPIError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -527,6 +527,7 @@ async def history(group: str = "all", offset: int = 0, limit: int = 20, champion
     rows = coach.db.query(
         f"SELECT data FROM history WHERE {where} ORDER BY game_creation DESC LIMIT ? OFFSET ?",
         (*args, limit, offset))
+    lp_by_game = game_lp(coach.db, coach.me.get("puuid"))
     games = []
     for r in rows:
         d = json.loads(r["data"])
@@ -539,6 +540,7 @@ async def history(group: str = "all", offset: int = 0, limit: int = 20, champion
             # a análise pós-jogo (mapa, farm, lane...) só faz sentido no Summoner's Rift
             "analysable": not d.get("remake") and any(d["queue_id"] in QUEUE_GROUPS[g] for g in ("solo", "flex", "normal")),
             "has_report": coach.db.postgame(d["match_id"]) is not None,
+            "lp": lp_by_game.get(d["match_id"]),
             "me": _player_view(me), "teams": _teams_compact(d["players"]),
         })
     summary = coach.db.query(

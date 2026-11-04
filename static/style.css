@@ -286,10 +286,12 @@ body[data-tab="cs"] .fab { display: flex; }
 .game.win { border-left-color: var(--good); background: linear-gradient(90deg, rgba(76, 191, 134, .06), var(--panel) 30%); }
 .game.loss { background: linear-gradient(90deg, rgba(229, 83, 75, .06), var(--panel) 30%); }
 .game.open { border-color: var(--gold-dark); }
-.game-row { display: grid; grid-template-columns: 120px 110px 130px 120px 190px 1fr 20px; gap: 12px; align-items: center; padding: 10px 12px; cursor: pointer; }
+.game-row { display: grid; grid-template-columns: 135px 110px 130px 120px 190px 1fr 20px; gap: 12px; align-items: center; padding: 10px 12px; cursor: pointer; }
 .game-row:hover { background: rgba(200, 170, 110, .04); }
 .g-meta, .g-kda, .g-stats { display: flex; flex-direction: column; gap: 1px; }
 .g-meta small, .g-kda small, .g-stats small { color: var(--muted); font-size: 12px; }
+.g-lp { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.g-lp.estimated { font-weight: 400; opacity: .7; }
 .g-kda strong { font-size: 16px; }
 .g-champ { display: flex; gap: 4px; align-items: center; }
 .champ-lvl { position: relative; }
@@ -432,6 +434,8 @@ body[data-tab="cs"] .fab { display: flex; }
 .compare th, .compare td { vertical-align: top; white-space: normal; }
 .compare tbody th { color: var(--gold); font-weight: 600; }
 .compare td { min-width: 130px; }
+.compare-boots { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.compare-boots span { display: inline-flex; align-items: center; gap: 4px; }
 
 /* rotas de jungle */
 .jg-map { max-width: 420px; }

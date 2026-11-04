@@ -121,7 +121,22 @@ class DDragon:
         return "3867" in self.items.get(iid, {}).get("from", [])  # 3867 = Bounty of Worlds
 
     def is_boots(self, iid: int) -> bool:
-        return "Boots" in self.items.get(iid, {}).get("tags", [])
+        # as Gunmetal Greaves (melhoria das Berserker's) não têm a tag "Boots": vêem-se pelo item de que são feitas
+        return bool(self._boots_chain(iid))
+
+    def _boots_chain(self, iid: int) -> list[int]:
+        """O item e as botas de que é feito, de cima para baixo: [Crimson Lucidity, Ionian, Boots]."""
+        it = self.items.get(iid, {})
+        for parent in it.get("from", []):
+            chain = self._boots_chain(int(parent))
+            if chain:
+                return [iid, *chain]
+        return [iid] if "Boots" in it.get("tags", []) else []
+
+    def boots_base(self, iid: int) -> int | None:
+        """As botas normais (a seguir às Boots básicas) de que este par vem; None se for um par básico."""
+        chain = self._boots_chain(iid)
+        return chain[-2] if len(chain) >= 2 else None
 
     def champ_lookup(self, text: str) -> int | None:
         t = text.strip().lower()
