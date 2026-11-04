@@ -333,6 +333,17 @@ DAILY_TASKS = ("meta", "mastery", "sync")
 DAY = 86400
 
 
+async def run_regions(coros) -> list:
+    """Corre uma tarefa por região em paralelo; se uma falhar, as outras param também."""
+    tasks = [asyncio.create_task(c) for c in coros]
+    try:
+        return await asyncio.gather(*tasks)
+    except Exception:
+        for t in tasks:
+            t.cancel()
+        raise
+
+
 def start_meta_job(regions=("euw1", "kr"), players=100, per_player=20, days=14, include_master=False,
                    timelines=True, backfill=300) -> bool:
     tiers = ("challenger", "grandmaster", "master") if include_master else ("challenger", "grandmaster")
@@ -340,9 +351,9 @@ def start_meta_job(regions=("euw1", "kr"), players=100, per_player=20, days=14, 
 
     async def run(progress):
         # cada região tem o seu limite de pedidos, por isso correm em paralelo
-        totals = await asyncio.gather(*(crawl_meta(
+        totals = await run_regions(crawl_meta(
             coach.api_for(r), coach.db, tiers=tiers, players=players, per_player=per_player, days=days,
-            timelines=timelines, backfill=backfill, progress=progress, label=r.upper()) for r in regions))
+            timelines=timelines, backfill=backfill, progress=progress, label=r.upper()) for r in regions)
         return sum(totals)
 
     return coach.start_job("meta", run)
@@ -354,9 +365,9 @@ def start_collect_job(target: int, regions=("euw1", "kr"), days=30, timelines=Tr
     share = [target // len(regions) + (i < target % len(regions)) for i in range(len(regions))]
 
     async def run(progress):
-        totals = await asyncio.gather(*(collect_new_games(
+        totals = await run_regions(collect_new_games(
             coach.api_for(r), coach.db, n, days=days, timelines=timelines, progress=progress, label=r.upper())
-            for r, n in zip(regions, share)))
+            for r, n in zip(regions, share))
         return sum(totals)
 
     return coach.start_job("meta", run)
@@ -366,8 +377,8 @@ def start_mastery_job(regions=("euw1", "kr")) -> bool:
     regions = [r for r in regions if r in config.META_PLATFORMS] or [config.PLATFORM]
 
     async def run(progress):
-        totals = await asyncio.gather(*(crawl_mastery(coach.api_for(r), coach.db, progress=progress, label=r.upper())
-                                        for r in regions))
+        totals = await run_regions(crawl_mastery(coach.api_for(r), coach.db, progress=progress, label=r.upper())
+                                   for r in regions)
         return sum(totals)
 
     return coach.start_job("mastery", run, unit="players checked")

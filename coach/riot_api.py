@@ -50,9 +50,14 @@ class RiotAPI:
     async def _get(self, url: str, params: dict | None = None):
         if not self.enabled:
             raise RiotAPIError("RIOT_API_KEY is not set in .env")
-        for _ in range(5):
+        for attempt in range(5):
             await self.limiter.acquire()
-            r = await self.client.get(url, params=params)
+            try:
+                r = await self.client.get(url, params=params)
+            except httpx.TransportError:
+                # ligação caiu ou a meio da resposta: espera (2, 4, 8, 16, 32 s) e tenta outra vez
+                await asyncio.sleep(2 ** (attempt + 1))
+                continue
             if r.status_code == 429:
                 await asyncio.sleep(int(r.headers.get("Retry-After", "5")))
                 continue
@@ -65,7 +70,7 @@ class RiotAPI:
                 continue
             r.raise_for_status()
             return r.json()
-        raise RiotAPIError(f"Failed after several attempts: {url}")
+        raise RiotAPIError("The Riot API did not respond after several attempts: check your internet connection or try again later")
 
     # --- account / summoner / league ---
     async def account_by_riot_id(self, game_name: str, tag_line: str):
