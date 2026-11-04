@@ -279,6 +279,15 @@ function runeTree(r) {
   return `<div class="rune-page">${tree(prim, prim.slots, true)}${tree(sec, sec.slots.slice(1), false)}${shards}</div>`;
 }
 
+function questItemsHtml(b) {
+  if (!b.quest_items?.length) return "";
+  return `<h3>Quest item <small>you choose it when the support quest ends</small></h3><div class="items">${
+    b.quest_items.map((it) => `
+      <div class="item">${icon(it, "ico")}<span>${esc(it.name)}</span>
+      <small>${pct(it.pick_rate)} of picks · ${pct(it.winrate)} WR</small></div>`).join("")
+  }</div>`;
+}
+
 function buildDetailHtml(b) {
   const parts = [];
   if (b.runes) {
@@ -290,6 +299,7 @@ function buildDetailHtml(b) {
   if (b.spells) parts.push(`<h3>Summoner spells</h3><p class="spells-row">${spellIcons(b.spells)} <small class="muted">${pct(b.spells.winrate)} WR in ${b.spells.games} games</small></p>`);
 
   const t = b.timeline;
+  parts.push(questItemsHtml(b));
   if (t) {
     if (t.skills) {
       const p = t.skills;
@@ -1133,6 +1143,7 @@ function compareMains(rep) {
       ${row("Skills", (b) => b.timeline?.skills ? `${b.timeline.skills.first3} · ${b.timeline.skills.priority}` : "–")}
       ${row("Start items", (b) => b.timeline?.start_items ? b.timeline.start_items.items.map((it) => icon(it, "ico small")).join("") : "–")}
       ${row("1st → 3rd item", (b) => b.timeline?.item_path ? b.timeline.item_path.items.map((it) => icon(it, "ico small")).join("›") : "–")}
+      ${ms.some((m) => m.build.quest_items?.length) ? row("Quest item", (b) => b.quest_items?.map((it) => icon(it, "ico small")).join("") || "–") : ""}
       ${row("Most used items", (b, m) => m.items.map((it) => icon(it, "ico small")).join("") || "–")}
     </tbody></table></div>`;
 }

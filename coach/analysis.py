@@ -246,7 +246,7 @@ def recommend_build(state: ChampSelectState, db: DB, dd: DDragon) -> dict:
         "champion": {"id": champ, "name": dd.champ_name(champ), "icon": dd.champ_icon(champ)},
         "opponent": {"id": opp, "name": dd.champ_name(opp), "icon": dd.champ_icon(opp)} if opp else None,
         "scope": scope, "sample": len(rows), "runes": None, "shards": None, "spells": None,
-        "core_items": [], "boots": None, "situational": [], "matchup": None,
+        "core_items": [], "boots": None, "situational": [], "matchup": None, "quest_items": quest_items(rows, dd),
     }
 
     if rows:
@@ -316,9 +316,26 @@ def spell_info(spells: tuple, dd: DDragon) -> dict:
             "games": games, "winrate": winrate}
 
 
+def quest_items(rows: list[dict], dd: DDragon) -> list[dict]:
+    """Escolhas do item da quest de suporte. Não aparece nas compras da timeline, por isso vem dos
+    itens no fim do jogo; a percentagem é entre os jogos em que a quest foi acabada."""
+    counts, wins = Counter(), Counter()
+    for r in rows:
+        for iid in set(r["items"]):
+            if dd.is_quest_item(iid):
+                counts[iid] += 1
+                wins[iid] += r["win"]
+    total = sum(counts.values())
+    if total < len(rows) * 0.3:  # não é um suporte (poucos jogos com o item)
+        return []
+    return [{"id": iid, "name": dd.item_name(iid), "icon": dd.item_icon(iid),
+             "pick_rate": n / total, "winrate": wr(wins[iid], n)}
+            for iid, n in counts.most_common() if n / total >= 0.05]
+
+
 def aggregate_build(rows: list[dict], dd: DDragon, pos: str | None = None) -> dict:
     """Runas, feitiços, skills e ordem de itens mais comuns num conjunto de jogos."""
-    out = {"sample": len(rows), "runes": None, "spells": None, "timeline": None}
+    out = {"sample": len(rows), "runes": None, "spells": None, "timeline": None, "quest_items": quest_items(rows, dd)}
     if not rows:
         return out
     page = _most_common(rows, lambda r: (r["primary_style"], r["sub_style"], tuple(r["perks"][:6])))

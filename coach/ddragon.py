@@ -82,6 +82,7 @@ class DDragon:
                 "name": it["name"],
                 "gold": it["gold"]["total"],
                 "into": it.get("into", []),
+                "from": it.get("from", []),
                 "tags": it.get("tags", []),
             }
         for s in raw["summoner"]["data"].values():
@@ -114,6 +115,10 @@ class DDragon:
         if "Boots" in it["tags"]:
             return it["gold"] >= 900
         return not it["into"] and it["gold"] >= 1000
+
+    def is_quest_item(self, iid: int) -> bool:
+        """Item de suporte final (Celestial Opposition, Bloodsong...): vem da quest, não se compra."""
+        return "3867" in self.items.get(iid, {}).get("from", [])  # 3867 = Bounty of Worlds
 
     def is_boots(self, iid: int) -> bool:
         return "Boots" in self.items.get(iid, {}).get("tags", [])
