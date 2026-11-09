@@ -226,8 +226,13 @@ def _most_common(rows: list[dict], key) -> tuple | None:
 
 def recommend_build(state: ChampSelectState, db: DB, dd: DDragon) -> dict:
     champ, pos = state.my_champion, state.my_position or None
-    enemy_roles = guess_enemy_roles(db, dd, state.enemies)
+    if not pos:  # fila sem roles: a role mais jogada do boneco, em vez de misturar runas de várias roles
+        roles = db.query("SELECT position, COUNT(*) g FROM participants WHERE source='meta' AND champion_id=? "
+                         "AND position != '' GROUP BY position ORDER BY g DESC LIMIT 1", (champ,))
+        pos = roles[0]["position"] if roles else None
+    enemy_roles = state.enemy_roles or guess_enemy_roles(db, dd, state.enemies)
     opp = enemy_roles.get(pos) if pos else None
+    label = POS_LABEL.get(pos, pos)
 
     base = "SELECT * FROM participants WHERE source='meta' AND champion_id=?"
     rows, scope = [], ""
@@ -235,17 +240,20 @@ def recommend_build(state: ChampSelectState, db: DB, dd: DDragon) -> dict:
         rows = db.query(base + " AND opponent_id=?" + (" AND position=?" if pos else ""),
                         (champ, opp, pos) if pos else (champ, opp))
         scope = f"vs {dd.champ_name(opp)}"
+    # as runas têm de ser as da role em que vais jogar: poucos jogos nessa role valem mais do que muitos noutra
     if len(rows) < 8 and pos:
         rows = db.query(base + " AND position=?", (champ, pos))
-        scope = f"overall in {pos}"
-    if len(rows) < 5:
+        scope = f"overall in {label}"
+    if not rows and pos:  # sem jogos high elo nesta role: vale qualquer jogo guardado nela
+        rows = db.query("SELECT * FROM participants WHERE champion_id=? AND position=?", (champ, pos))
+    if not rows:
         rows = db.query(base, (champ,))
-        scope = "overall"
+        scope = f"other roles (no games in {label} yet)" if pos else "overall"
 
     result = {
         "champion": {"id": champ, "name": dd.champ_name(champ), "icon": dd.champ_icon(champ)},
         "opponent": {"id": opp, "name": dd.champ_name(opp), "icon": dd.champ_icon(opp)} if opp else None,
-        "scope": scope, "sample": len(rows), "runes": None, "shards": None, "spells": None,
+        "position": pos, "scope": scope, "sample": len(rows), "runes": None, "shards": None, "spells": None,
         "core_items": [], "boots": None, "situational": [], "matchup": None, "quest_items": quest_items(rows, dd),
     }
 
@@ -295,7 +303,7 @@ def recommend_build(state: ChampSelectState, db: DB, dd: DDragon) -> dict:
         broader = db.query(base + " AND purchases IS NOT NULL" + (" AND position=?" if pos else ""),
                            (champ, pos) if pos else (champ,))
         if len(broader) > len(tl_rows):
-            tl_rows, tl_scope = broader, f"overall in {pos}" if pos else "overall"
+            tl_rows, tl_scope = broader, f"overall in {label}" if pos else "overall"
     result["timeline"] = timeline_build(tl_rows, dd, pos) if tl_rows else None
     if result["timeline"]:
         result["timeline"]["scope"] = tl_scope

@@ -32,12 +32,12 @@ Everything is calculated locally from the Riot API. No paid services.
 2. Get a key at <https://developer.riotgames.com>. A *Development Key* lasts 24h; to avoid renewing it every day, request a **Personal API Key** under "Register Product".
 3. Double-click `run.bat`. The first time it creates the Python environment and opens `.env` so you can fill in:
    - `RIOT_API_KEY=RGAPI-...`
-   - `RIOT_ID=YourName#TAG`
-4. Run `run.bat` again. The browser opens at <http://127.0.0.1:8765> and the app keeps running in the background, with an icon in the Windows tray (bottom right, it may be under the `^` arrow). Click it to open the app; right-click it to quit. Running `run.bat` while the app is open just opens the browser.
-5. In the **My data** tab:
+4. Run `run.bat` again. The browser opens at <http://127.0.0.1:8765> and the app keeps running in the background, with an icon in the Windows tray (bottom right, it may be under the `^` arrow). Click it to open the app; right-click it to quit or to tick **Start with Windows**. Running `run.bat` while the app is open just opens the browser.
+5. Search your Riot ID at the top of the page and click **Set as favorite**. To use another account, do the same with it: each account's data is kept apart.
+6. In the **My data** tab:
    - click **Sync season** to fetch all your games;
    - click **Collect** under "High elo data", with EUW and KR ticked. It takes a while because of the key's request limit; run it again from time to time, especially after a patch.
-6. In the **Mains** tab, click **Collect masteries** (~20 min, regions in parallel).
+7. In the **Mains** tab, click **Collect masteries** (~20 min, regions in parallel).
 
 After that, just open the LoL client and join a queue: the app connects by itself.
 

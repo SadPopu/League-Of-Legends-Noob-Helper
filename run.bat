@@ -31,7 +31,7 @@ if errorlevel 1 (
 rem --- settings file
 if not exist .env (
     copy .env.example .env >nul
-    echo Created the .env file - fill in RIOT_API_KEY and RIOT_ID, save it, then run this again.
+    echo Created the .env file - fill in RIOT_API_KEY, save it, then run this again.
     notepad .env
     exit /b 0
 )

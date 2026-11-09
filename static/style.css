@@ -50,6 +50,13 @@ nav button {
 }
 nav button:hover { color: var(--text); }
 nav button.active { color: var(--gold-2); border-bottom-color: var(--gold); }
+.acc-search { position: relative; flex: 0 1 240px; min-width: 170px; }
+.acc-search input { width: 100%; }
+.acc-result { position: absolute; top: calc(100% + 6px); left: 0; width: 320px; max-width: calc(100vw - 32px); padding: 12px; background: var(--panel-2); border: 1px solid var(--border-gold); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
+.acc-found { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.acc-found img { width: 42px; height: 42px; border-radius: 8px; }
+.acc-found strong { display: block; overflow-wrap: anywhere; }
+.acc-result button { width: 100%; }
 .status { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 11px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); font-size: 12.5px; }
 .pill:empty { display: none; }
@@ -192,6 +199,23 @@ tbody tr:hover { background: rgba(200, 170, 110, .04); }
 
 .ingame-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; background: rgba(76, 191, 134, .1); border: 1px solid rgba(76, 191, 134, .35); color: var(--good); padding: 8px 12px; border-radius: 8px; margin-bottom: 14px; font-weight: 600; }
 .ingame-banner[hidden] { display: none; }
+#tab-cs.game-on .cs-side { display: none; }
+#tab-cs.game-on .cs-layout { grid-template-columns: minmax(0, 1fr); }
+.cs-game { margin-bottom: 18px; }
+.cs-game[hidden] { display: none; }
+.cs-game .side-title.enemy { color: #e58a84; margin-top: 14px; }
+.game-cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.lcard { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; min-width: 0; }
+.lcard.me { border-color: var(--gold); }
+.lcard-art { position: relative; height: 170px; background-size: cover; background-position: center 15%; background-color: var(--panel-3); }
+.lcard-role { position: absolute; top: 6px; left: 6px; padding: 2px 8px; border-radius: 999px; background: rgba(6, 9, 13, .8); color: var(--gold-2); font-size: 12px; font-weight: 600; }
+.lcard-role small { color: var(--muted); font-weight: 400; }
+.lcard-kit { position: absolute; right: 6px; bottom: 6px; display: flex; gap: 3px; }
+.lcard-kit img { width: 22px; height: 22px; border-radius: 4px; background: rgba(6, 9, 13, .8); }
+.lcard-body { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px 10px; font-size: 12.5px; }
+.lcard-body .who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lcard-body .champ { color: var(--gold-2); font-weight: 600; }
+.lcard-body small { color: var(--muted); font-size: 12px; }
 
 /* build */
 .matchup { display: flex; align-items: center; gap: 10px; background: var(--panel-2); padding: 10px; border-radius: 8px; border: 1px solid var(--border); }
@@ -497,6 +521,7 @@ body[data-tab="cs"] .fab { display: flex; }
   .cs-layout { grid-template-columns: 1fr 1fr; }
   .cs-center { grid-column: 1 / -1; grid-row: 2; }
   .cs-side { position: static; }
+  .game-cards { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .profile-top { grid-template-columns: 1fr; }
 }
 @media (max-width: 1000px) {

@@ -9,7 +9,7 @@ import sys
 import threading
 import webbrowser
 
-from . import config
+from . import autostart, config
 
 URL = f"http://127.0.0.1:{config.PORT}"
 LOG_PATH = config.DATA_DIR / "noob-helper.log"
@@ -31,10 +31,12 @@ def icon_image():
     return img
 
 
-def main():
+def main(open_browser: bool = True):
+    """open_browser=False é o arranque com o Windows: fica só o ícone, sem abrir o browser."""
     # abrir a app outra vez com ela já a correr só abre o browser (e não apaga o log da que está a correr)
     if already_running():
-        webbrowser.open(URL)
+        if open_browser:
+            webbrowser.open(URL)
         return
 
     # o pythonw não tem stdout/stderr: sem isto os logs do uvicorn rebentam ao arrancar
@@ -52,9 +54,22 @@ def main():
     def quit_app(*_):
         server.should_exit = True  # ao parar o servidor, run_server fecha o ícone e o programa acaba
 
+    def toggle_autostart(icon, _item):
+        try:
+            autostart.disable() if autostart.is_enabled() else autostart.enable()
+        except OSError:
+            logging.exception("Could not change the Windows startup entry")
+        icon.update_menu()
+
+    try:
+        autostart.refresh()
+    except OSError:
+        logging.exception("Could not update the Windows startup entry")
+
     icon = pystray.Icon("noob-helper", icon_image(), "Noob Helper", pystray.Menu(
         pystray.MenuItem("Open Noob Helper", lambda *_: webbrowser.open(URL), default=True),
         pystray.MenuItem("Open log", lambda *_: os.startfile(LOG_PATH)),
+        pystray.MenuItem("Start with Windows", toggle_autostart, checked=lambda _item: autostart.is_enabled()),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", quit_app),
     ))
@@ -68,7 +83,7 @@ def main():
     def open_when_ready():
         while not server.started and not server.should_exit:
             threading.Event().wait(0.2)
-        if server.started:
+        if server.started and open_browser:
             webbrowser.open(URL)
 
     def setup(icon):

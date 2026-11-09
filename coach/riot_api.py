@@ -2,6 +2,7 @@
 import asyncio
 import time
 from collections import deque
+from contextvars import ContextVar
 from urllib.parse import quote
 
 import httpx
@@ -9,6 +10,12 @@ import httpx
 
 class RiotAPIError(Exception):
     pass
+
+
+# Tarefas longas (sincronizar jogos) gastariam o limite todo de uma vez e o que o utilizador pede
+# ficaria à espera até 2 minutos. Com isto ligado, a tarefa deixa uma parte do limite livre.
+background_job: ContextVar[bool] = ContextVar("background_job", default=False)
+BACKGROUND_SHARE = 0.85
 
 
 class RateLimiter:
@@ -19,20 +26,22 @@ class RateLimiter:
         self.lock = asyncio.Lock()
 
     async def acquire(self):
-        async with self.lock:
-            while True:
+        share = BACKGROUND_SHARE if background_job.get() else 1
+        while True:
+            async with self.lock:
                 now = time.monotonic()
                 wait = 0.0
                 for limit, period, stamps in self.windows:
                     while stamps and now - stamps[0] >= period:
                         stamps.popleft()
-                    if len(stamps) >= limit:
-                        wait = max(wait, period - (now - stamps[0]) + 0.05)
+                    cap = int(limit * share)
+                    if len(stamps) >= cap:
+                        wait = max(wait, period - (now - stamps[len(stamps) - cap]) + 0.05)
                 if wait <= 0:
                     for _, _, stamps in self.windows:
                         stamps.append(now)
                     return
-                await asyncio.sleep(wait)
+            await asyncio.sleep(wait)  # fora do lock: um pedido do utilizador pode passar à frente
 
 
 class RiotAPI:
@@ -95,6 +104,14 @@ class RiotAPI:
     async def apex_league(self, tier: str, queue: str = "RANKED_SOLO_5x5"):
         """tier: challenger | grandmaster | master"""
         return await self._get(f"{self.platform_url}/lol/league/v4/{tier}leagues/by-queue/{queue}")
+
+    async def mastery_champion(self, puuid: str, champion_id: int):
+        return await self._get(
+            f"{self.platform_url}/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}/by-champion/{champion_id}")
+
+    async def active_game(self, puuid: str):
+        """O jogo a decorrer desta conta (None se não estiver em jogo)."""
+        return await self._get(f"{self.platform_url}/lol/spectator/v5/active-games/by-summoner/{puuid}")
 
     # --- match-v5 ---
     async def match_ids(self, puuid: str, queue: int | None = None, start: int = 0, count: int = 20,

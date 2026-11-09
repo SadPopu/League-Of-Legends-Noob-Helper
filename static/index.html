@@ -6,7 +6,7 @@
   <title>Noob Helper</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="/static/style.css?v=23">
+  <link rel="stylesheet" href="/static/style.css?v=25">
 </head>
 <body data-tab="cs">
 <header class="topbar">
@@ -20,7 +20,12 @@
     <button data-tab="mains">Mains</button>
     <button data-tab="data">Data</button>
   </nav>
+  <form id="acc-search" class="acc-search" autocomplete="off">
+    <input id="acc-input" type="search" placeholder="Search Riot ID (Name#TAG)" aria-label="Search Riot ID" spellcheck="false">
+    <div id="acc-result" class="acc-result" hidden></div>
+  </form>
   <div id="status" class="status">
+    <span id="st-me" class="pill" title="The account this app is showing"></span>
     <span id="st-phase" class="pill"></span>
     <span id="st-lcu" class="pill"><i class="dot"></i><span>Client</span></span>
   </div>
@@ -32,6 +37,12 @@
     <div id="cs-ingame" class="ingame-banner" hidden>
       <span>● Game in progress: your champ select build and tips stay here until the game ends.</span>
       <button id="ingame-mains" class="secondary" hidden></button>
+    </div>
+    <div id="cs-game" class="cs-game" hidden>
+      <h3 class="side-title">Your team</h3>
+      <div id="game-allies" class="game-cards"></div>
+      <h3 class="side-title enemy">Enemy team</h3>
+      <div id="game-enemies" class="game-cards"></div>
     </div>
     <div class="cs-layout">
       <aside class="cs-side ally">
@@ -240,6 +251,6 @@
   <datalist id="champ-list"></datalist>
 </div>
 
-<script src="/static/app.js?v=23"></script>
+<script src="/static/app.js?v=27"></script>
 </body>
 </html>

@@ -1,11 +1,13 @@
 """Servidor web local: liga o cliente do LoL, a API da Riot e a interface no browser."""
 import asyncio
+import hashlib
 import json
 import os
 import logging
 import time
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +17,8 @@ from . import config
 from .analysis import my_champion_stats, recommend_build, recommend_counters, recommend_picks
 from .champselect import ChampSelectState, mock_session, parse_session
 from .data import collect_new_games, crawl_meta
+from .ingame import (RIFT_MAP, assign_roles, fetch_basics, fetch_performance, live_positions, players_from_game,
+                     public_player)
 from .history import QUEUE_GROUPS, QUEUE_NAMES, store_match, sync_history
 from .db import DB
 from .ddragon import DDragon
@@ -22,16 +26,22 @@ from .lcu import LCU
 from .mains import crawl_mastery, ensure_names, games_stale, mains_report, refresh_main_games, top_mains
 from .postgame import analyse_match
 from .profile import QUEUES, game_lp, lp_series, rank_view
-from .riot_api import RiotAPI, RiotAPIError
+from .riot_api import RiotAPI, RiotAPIError, background_job
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
 log = logging.getLogger("coach")
 
+FAVORITE_KEY = "favorite_account"
+GAME_START_PHASES = {"GameStart", "InProgress", "Reconnect"}
+GAME_LOOKUP_TRIES, GAME_LOOKUP_WAIT = 30, 10  # até 5 minutos à espera que a Riot publique o jogo
+LIVE_POSITION_TRIES, LIVE_POSITION_WAIT = 30, 15  # o jogo só responde depois do ecrã de loading
 ARAM_QUEUES = {450, 2400}
 # fases do cliente em que o jogo está a decorrer (a build do champ select fica no ecrã)
 IN_GAME_PHASES = {"GameStart", "InProgress", "Reconnect", "WaitingForStats"}
 # fases em que a build do champ select anterior deixa de interessar
 CLEAR_PHASES = {"None", "Lobby", "Matchmaking", "ReadyCheck", "PreEndOfGame", "EndOfGame", "TerminatedInError"}
+# muda quando a página muda: um separador que ficou aberto com a versão antiga recarrega-se sozinho
+APP_BUILD = hashlib.sha1(b"".join(f.read_bytes() for f in sorted(config.STATIC_DIR.iterdir()) if f.is_file())).hexdigest()[:12]
 
 
 class Coach:
@@ -52,6 +62,8 @@ class Coach:
         self.postgame_task: asyncio.Task | None = None
         self.cs_ended = False  # champ select acabou mas a build continua no ecrã (jogo a decorrer)
         self.profile: dict = {}  # nome, ícone e rank (guardado uns minutos)
+        self.cs_state: ChampSelectState | None = None  # último estado do champ select
+        self.game_task: asyncio.Task | None = None
 
     # ---------------------------------------------------------------- broadcast
     async def send(self, msg: dict, remember: bool = True):
@@ -68,17 +80,18 @@ class Coach:
 
     def status(self) -> dict:
         return {"type": "status", "lcu": self.lcu.connected, "me": self.me, "phase": self.phase,
-                "riot_key": bool(config.RIOT_API_KEY), "jobs": self.jobs, "version": self.dd.version}
+                "riot_key": bool(config.RIOT_API_KEY), "jobs": self.jobs, "version": self.dd.version,
+                "build": APP_BUILD}
 
     async def push_status(self):
         await self.send(self.status())
 
     # ---------------------------------------------------------------- identidade
     async def resolve_me(self):
-        # A conta é a do RIOT_ID no .env; só sem ele é que se usa a que está aberta no cliente.
+        # A conta é a favorita escolhida na app; sem favorita, a do RIOT_ID no .env; sem ele, a aberta no cliente.
         # O PUUID do cliente (LCU) não serve para a API da Riot, que usa PUUIDs encriptados
         # por chave. Do cliente tiramos só o Riot ID e pedimos o PUUID à API.
-        riot_id = config.RIOT_ID
+        riot_id = self.db.kv_get(FAVORITE_KEY) or config.RIOT_ID
         if not riot_id and self.lcu.connected:
             s = await self.lcu.get("/lol-summoner/v1/current-summoner")
             if s and s.get("gameName"):
@@ -118,12 +131,16 @@ class Coach:
             session = await self.lcu.get("/lol-champ-select/v1/session")
             if session and session.get("myTeam"):
                 await self.handle_session(session)
+            if self.phase in GAME_START_PHASES:
+                self.start_game_tracking()
         await self.push_status()
 
     async def on_lcu_event(self, uri: str, data):
         if uri == "/lol-champ-select/v1/session":
             if data and data.get("myTeam"):
-                await self.handle_session(data)
+                # a sessão ainda pode atualizar-se com o jogo a começar: isso não é um champ select novo
+                if self.phase not in GAME_START_PHASES:
+                    await self.handle_session(data)
             elif not self.cs_ended:
                 # o champ select acabou: se foi porque o jogo começou, a build fica visível até ao fim do jogo
                 self.cs_ended = True
@@ -133,6 +150,8 @@ class Coach:
             await self.push_status()
             if self.cs_ended and data in CLEAR_PHASES:
                 await self.clear_champselect()
+            if data in GAME_START_PHASES:
+                self.start_game_tracking()
             if data in ("PreEndOfGame", "EndOfGame"):
                 self.schedule_postgame()
 
@@ -152,7 +171,9 @@ class Coach:
     async def clear_champselect(self):
         self.cs_ended = False
         self.picks_sig = self.build_sig = None
-        for k in ("champselect", "picks", "counters", "build", "mains", "ingame"):
+        self.cs_state = None
+        self.stop_game_tracking()
+        for k in ("champselect", "picks", "counters", "build", "mains", "ingame", "game"):
             self.last.pop(k, None)
         await self.send({"type": "champselect_end"}, remember=False)
 
@@ -160,8 +181,11 @@ class Coach:
     async def handle_session(self, session: dict):
         if self.cs_ended:  # novo champ select: esquece o anterior
             self.cs_ended = False
+            self.stop_game_tracking()
             self.last.pop("ingame", None)
+            self.last.pop("game", None)
         st = parse_session(session)
+        self.cs_state = st
         await self.send(self.champselect_payload(st))
 
         # build/mains primeiro (rápidos); sugestões em segundo plano para não atrasar os eventos seguintes
@@ -169,7 +193,7 @@ class Coach:
             self.build_sig = st.build_signature()
             build = await asyncio.to_thread(recommend_build, st, self.db, self.dd)
             await self.send({"type": "build", "locked": st.locked, **build})
-            await self.send_mains(st.my_champion)
+            await self.send_mains(st.my_champion, st.my_position or None)
 
         if st.picks_signature() != self.picks_sig and not st.locked:
             self.picks_sig = st.picks_signature()
@@ -185,16 +209,16 @@ class Coach:
         if sig == self.picks_sig:
             await self.send({"type": "counters", **counters})
 
-    async def send_mains(self, champ: int):
+    async def send_mains(self, champ: int, position: str | None = None):
         mains = top_mains(self.db, champ)
-        report = await asyncio.to_thread(mains_report, self.db, self.dd, champ, mains)
+        report = await asyncio.to_thread(mains_report, self.db, self.dd, champ, mains, position)
         await self.send({"type": "mains", **report})
         if any(not m.get("name") for m in mains):
             # os nomes vêm da API (pode demorar se houver uma recolha a correr): envia de novo quando chegarem
             async def names_later():
                 await ensure_names(self.apis_for(mains), self.db, mains)
                 if self.build_sig and self.build_sig[0] == champ:
-                    rep2 = await asyncio.to_thread(mains_report, self.db, self.dd, champ, mains)
+                    rep2 = await asyncio.to_thread(mains_report, self.db, self.dd, champ, mains, position)
                     await self.send({"type": "mains", **rep2})
             asyncio.create_task(names_later())
 
@@ -215,6 +239,114 @@ class Coach:
             "ally_bans": [champ(c) for c in st.ally_bans],
             "enemy_bans": [champ(c) for c in st.enemy_bans],
         }
+
+    # ---------------------------------------------------------------- jogo a começar
+    def start_game_tracking(self):
+        if self.game_task and not self.game_task.done():
+            return
+        self.cs_ended = True  # a app pode ter aberto já com o jogo a decorrer
+        self.game_task = asyncio.create_task(self.track_game())
+
+    def stop_game_tracking(self):
+        if self.game_task and not self.game_task.done():
+            self.game_task.cancel()
+        self.game_task = None
+
+    async def client_puuid(self) -> str | None:
+        """A conta que está mesmo a jogar é a do cliente, que pode não ser a favorita."""
+        s = await self.lcu.get("/lol-summoner/v1/current-summoner")
+        if not s or not s.get("gameName"):
+            return None
+        acc = await self.riot.account_by_riot_id(s["gameName"], s.get("tagLine", ""))
+        return acc["puuid"] if acc else None
+
+    async def track_game(self):
+        try:
+            puuid = await self.client_puuid()
+            if not puuid:
+                return
+            # a Riot só publica o jogo uns segundos depois de começar
+            for _ in range(GAME_LOOKUP_TRIES):
+                try:
+                    game = await self.riot.active_game(puuid)
+                except (RiotAPIError, httpx.HTTPStatusError) as e:  # uma falha da Riot não desiste do jogo
+                    log.warning("Live game: %s", e)
+                    game = None
+                if game:
+                    await self.follow_game(game, puuid)
+                    return
+                if self.phase not in IN_GAME_PHASES:
+                    return
+                await asyncio.sleep(GAME_LOOKUP_WAIT)
+        except RiotAPIError as e:
+            log.warning("Live game: %s", e)
+        except Exception:
+            log.exception("Could not read the live game")
+
+    async def follow_game(self, game: dict, puuid: str | None, watch_live: bool = True):
+        """Mostra logo os 10 jogadores; os dados de cada um e as roles vão sendo acrescentados."""
+        players = players_from_game(game, puuid, self.dd)
+        is_rift = game.get("mapId") == RIFT_MAP and len(players) == 10
+        known: dict = {}
+        me = next((p for p in players if p["me"]), None)
+        if self.cs_state and me:
+            known = {(me["team"], a["champion"]): (a["position"], "team")
+                     for a in self.cs_state.allies if a["champion"] and a["position"]}
+
+        async def publish():
+            await self.send({"type": "game", "game_id": game.get("gameId"), "is_rift": is_rift,
+                             "players": [public_player(p) for p in players]})
+
+        async def update_roles():
+            if is_rift:
+                await asyncio.to_thread(assign_roles, self.db, self.dd, players, known)
+                await self.update_game_build(players)
+
+        async def enrich():
+            background_job.set(True)  # o que pedires na app passa à frente destes pedidos
+            await asyncio.gather(*(fetch_basics(self.riot, p) for p in players))
+            await publish()
+            # o adversário de lane primeiro, a seguir os inimigos, a tua equipa no fim
+            team = me["team"] if me else None
+            for p in sorted(players, key=lambda x: (x["team"] == team, not (me and x["role"] == me["role"]))):
+                await fetch_performance(self.riot, self.db, p)
+                await publish()
+            await update_roles()  # os últimos jogos de cada um ajudam a acertar as roles
+            await publish()
+
+        async def follow_live():
+            for _ in range(LIVE_POSITION_TRIES):
+                found = await live_positions(self.dd)
+                if found:
+                    known.update(found)
+                    await update_roles()
+                    await publish()
+                    return
+                await asyncio.sleep(LIVE_POSITION_WAIT)
+
+        await update_roles()
+        await publish()
+        await asyncio.gather(enrich(), *([follow_live()] if watch_live and is_rift else []))
+
+    async def update_game_build(self, players: list[dict]):
+        """Refaz a build com a role e o adversário reais; se nada mudou, não faz nada."""
+        me = next((p for p in players if p["me"]), None)
+        if not me or not me["role"]:
+            return
+        side = [p for p in players if p["team"] == me["team"]]
+        enemies = [p for p in players if p["team"] != me["team"]]
+        st = ChampSelectState(
+            my_position=me["role"], my_champion=me["champion_id"], locked=True,
+            allies=[{"champion": p["champion_id"], "position": p["role"], "me": p["me"], "locked": True} for p in side],
+            enemies=[p["champion_id"] for p in enemies],
+            enemy_roles={p["role"]: p["champion_id"] for p in enemies},
+            bans=self.cs_state.bans if self.cs_state else [])
+        if st.build_signature() == self.build_sig:
+            return
+        self.build_sig = st.build_signature()
+        build = await asyncio.to_thread(recommend_build, st, self.db, self.dd)
+        await self.send({"type": "build", "locked": True, "from_game": True, **build})
+        await self.send_mains(me["champion_id"], me["role"])
 
     # ---------------------------------------------------------------- pós-jogo
     def schedule_postgame(self):
@@ -388,6 +520,7 @@ def start_sync_job() -> bool:
     if not coach.me:
         return False
     async def run(progress):
+        background_job.set(True)
         n = await sync_history(coach.riot, coach.db, coach.me["puuid"], progress)
         try:
             await coach.refresh_profile(force=True)
@@ -440,6 +573,16 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Noob Helper", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def never_cache_page(request, call_next):
+    """O browser não pode reabrir a página de uma cópia antiga depois de a app mudar."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 
 
@@ -482,8 +625,67 @@ async def sync():
     """Sincroniza todos os teus jogos da season (histórico + estatísticas ranked)."""
     await coach.resolve_me()
     if not coach.me:
-        return {"ok": False, "error": "Unknown account: open the LoL client or set RIOT_ID in .env"}
+        return {"ok": False, "error": "Unknown account: search for your Riot ID at the top of the page"}
     return {"ok": start_sync_job()}
+
+
+# ---------------------------------------------------------------- pesquisa de contas e favorita
+async def lookup_account(riot_id: str) -> dict:
+    """Procura um Riot ID no servidor da app. Devolve {"ok": False, "error": ...} se não der para o usar."""
+    name, _, tag = riot_id.strip().partition("#")
+    name, tag = name.strip(), tag.strip()
+    if not name or not tag:
+        return {"ok": False, "error": "Type the full Riot ID, like Name#TAG"}
+    if not tag.isalnum():  # a Riot responde com erro de servidor em vez de "não existe"
+        return {"ok": False, "error": f"No account called {name}#{tag}"}
+    try:
+        acc = await coach.riot.account_by_riot_id(name, tag)
+        if not acc:
+            return {"ok": False, "error": f"No account called {name}#{tag}"}
+        full_name = f"{acc['gameName']}#{acc['tagLine']}"
+        summ = await coach.riot.summoner_by_puuid(acc["puuid"])
+        if not summ:  # a conta existe mas joga noutro servidor: os jogos dela não se encontram com esta região
+            return {"ok": False, "error": f"{full_name} doesn't play on this server ({config.PLATFORM.upper()})"}
+        entries = await coach.riot.league_entries_by_puuid(acc["puuid"])
+    except RiotAPIError as e:
+        return {"ok": False, "error": str(e)}
+    except httpx.HTTPStatusError:  # a Riot recusa nomes com caracteres inválidos
+        return {"ok": False, "error": f"No account called {name}#{tag}"}
+    solo = next((e for e in entries if e.get("queueType") == QUEUES["solo"]), None)
+    return {"ok": True, "puuid": acc["puuid"], "name": full_name, "level": summ.get("summonerLevel"),
+            "icon": f"https://ddragon.leagueoflegends.com/cdn/{coach.dd.version}/img/profileicon/{summ['profileIconId']}.png"
+                    if summ.get("profileIconId") is not None else None,
+            "rank": rank_view(solo), "is_favorite": full_name.lower() == (coach.db.kv_get(FAVORITE_KEY) or "").lower()}
+
+
+class FavoriteParams(BaseModel):
+    riot_id: str
+
+
+@app.get("/api/account/search")
+async def account_search(riot_id: str):
+    found = await lookup_account(riot_id)
+    found.pop("puuid", None)
+    return found
+
+
+@app.post("/api/account/favorite")
+async def account_favorite(params: FavoriteParams):
+    """A conta favorita passa a ser a conta da app, e continua a sê-lo depois de reiniciar."""
+    found = await lookup_account(params.riot_id)
+    if not found["ok"]:
+        return found
+    coach.db.kv_set(FAVORITE_KEY, found["name"])
+    if coach.me.get("puuid") != found["puuid"]:
+        # uma sincronização a meio é da conta anterior: tem de acabar antes de começar a da nova
+        if coach.stop_job("sync"):
+            await coach.job_tasks["sync"]
+        coach.me = {"puuid": found["puuid"], "name": found["name"]}
+        coach.switch_account()
+        start_sync_job()  # mesmo uma conta já conhecida pode ter jogos novos
+        asyncio.create_task(my_mastery())
+    await coach.push_status()
+    return {"ok": True, "name": found["name"]}
 
 
 # ---------------------------------------------------------------- histórico
@@ -625,7 +827,7 @@ async def my_mastery(refresh: bool = False):
     """Os teus 10 bonecos com mais pontos de maestria (guardados 6 h para não gastar pedidos)."""
     await coach.resolve_me()
     if not coach.me:
-        return {"ok": False, "error": "Unknown account: open the LoL client or set RIOT_ID in .env", "champions": []}
+        return {"ok": False, "error": "Unknown account: search for your Riot ID at the top of the page", "champions": []}
     cached = json.loads(coach.db.kv_get("my_mastery") or "{}")
     if refresh or cached.get("puuid") != coach.me["puuid"] or time.time() - cached.get("ts", 0) > 6 * 3600:
         try:
@@ -708,7 +910,7 @@ async def postgame_list():
 async def postgame_analyse(match_id: str | None = None):
     await coach.resolve_me()
     if not coach.me:
-        return {"ok": False, "error": "Unknown account: open the LoL client or set RIOT_ID in .env"}
+        return {"ok": False, "error": "Unknown account: search for your Riot ID at the top of the page"}
     try:
         if not match_id:
             ids = await coach.riot.match_ids(coach.me["puuid"], count=5)
@@ -740,7 +942,7 @@ async def profile(refresh: bool = False):
         if not p:
             return {"ok": False, "error": str(e)}
     if not p:
-        return {"ok": False, "error": "Unknown account: open the LoL client or set RIOT_ID in .env"}
+        return {"ok": False, "error": "Unknown account: search for your Riot ID at the top of the page"}
     return {"ok": True, **{k: v for k, v in p.items() if k != "puuid"}}
 
 

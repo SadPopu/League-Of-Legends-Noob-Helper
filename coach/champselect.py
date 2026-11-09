@@ -12,6 +12,7 @@ class ChampSelectState:
     bans: list[int] = field(default_factory=list)
     ally_bans: list[int] = field(default_factory=list)
     enemy_bans: list[int] = field(default_factory=list)
+    enemy_roles: dict[str, int] = field(default_factory=dict)  # roles inimigas já conhecidas (jogo a decorrer)
     phase: str = ""
 
     def unavailable(self) -> set[int]:
@@ -23,7 +24,7 @@ class ChampSelectState:
                 tuple((a["position"], a["champion"]) for a in self.allies if not a["me"]))
 
     def build_signature(self):
-        return (self.my_champion, self.my_position, tuple(sorted(self.enemies)))
+        return (self.my_champion, self.my_position, tuple(sorted(self.enemies)), tuple(sorted(self.enemy_roles.items())))
 
 
 def parse_session(s: dict) -> ChampSelectState:

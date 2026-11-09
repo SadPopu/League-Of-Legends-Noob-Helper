@@ -49,6 +49,7 @@ function handle(msg) {
       if (isActive("mains") && mainsState.selected === msg.champion) openMains(msg.champion, true);
       return;
     case "ingame": return showIngame();
+    case "game": return renderGame(msg);
     case "champselect_end": return resetChampSelect();
     case "history_updated":
       if (isActive("profile")) { loadProfile(); loadHistory(true); }
@@ -69,6 +70,7 @@ const STEP_TXT = {
 };
 const stepText = (s) => STEP_TXT[s] || s.replace(/^main (\d+)\/(\d+) games$/, "player $1 of $2");
 const lastJobRunning = {};
+let lastMe = null;
 let JOBS = {};
 
 function jobView(name) {
@@ -92,7 +94,12 @@ function renderJobs() {
   if (stop) stop.hidden = !JOBS.meta?.running;
 }
 
+let pageBuild = null;
+
 function renderStatus(s) {
+  // a app foi atualizada com este separador aberto: sem recarregar ele continuava com o código antigo
+  if (pageBuild && s.build && s.build !== pageBuild) { location.reload(); return; }
+  pageBuild = s.build || pageBuild;
   const lcu = $("#st-lcu");
   lcu.querySelector("span").textContent = s.lcu ? "Client connected" : "Client offline";
   lcu.className = "pill " + (s.lcu ? "ok" : "off");
@@ -107,22 +114,85 @@ function renderStatus(s) {
     const j = JOBS[name];
     // quando uma recolha acaba, atualiza o que estiver aberto
     if (j && !j.running && lastJobRunning[name]) {
-      if (isActive("data")) loadData();
-      if (isActive("profile")) { loadProfile(); loadHistory(true); if (!$("#prof-champs").hidden) loadStats(); }
-      if (isActive("mains")) {
-        loadMainsList();
-        if (mainsState.selected) openMains(mainsState.selected, true);
-      }
+      refreshOpenTab();
     }
     lastJobRunning[name] = !!j?.running;
   }
+  // mudou a conta favorita: o que está aberto era da conta anterior
+  const me = s.me?.name || "";
+  $("#st-me").textContent = me ? `★ ${me}` : "";
+  if (lastMe !== null && me !== lastMe) refreshOpenTab();
+  lastMe = me;
 }
+
+function refreshOpenTab() {
+  if (isActive("data")) loadData();
+  if (isActive("profile")) { loadProfile(); loadHistory(true); if (!$("#prof-champs").hidden) loadStats(); }
+  if (isActive("mains")) {
+    loadMainsList();
+    if (mainsState.selected) openMains(mainsState.selected, true);
+  }
+}
+
+// ---------------------------------------------------------------- pesquisa de contas e favorita
+const accBox = $("#acc-result");
+let accSeq = 0;
+
+$("#acc-search").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const riotId = $("#acc-input").value.trim();
+  if (!riotId) return;
+  const seq = ++accSeq;
+  accBox.hidden = false;
+  accBox.innerHTML = `<small class="muted">Searching…</small>`;
+  let res;
+  try {
+    res = await getJSON(`/api/account/search?riot_id=${encodeURIComponent(riotId)}`);
+  } catch {
+    res = { ok: false, error: "Could not reach the app. Is it still running?" };
+  }
+  if (seq !== accSeq) return; // entretanto fez-se outra pesquisa
+  if (!res.ok) { accBox.innerHTML = `<small class="bad">${esc(res.error)}</small>`; return; }
+  accBox.innerHTML = `
+    <div class="acc-found">
+      ${res.icon ? `<img src="${res.icon}" alt="">` : ""}
+      <div><strong>${esc(res.name)}</strong>
+      <small class="muted">${res.level != null ? `Level ${res.level}` : ""}${res.rank ? ` · ${rankName(res.rank)} ${res.rank.lp} LP` : " · Unranked"}</small></div>
+    </div>
+    <button type="button" id="acc-favorite" ${res.is_favorite ? "disabled" : ""}>${res.is_favorite ? "★ Your favorite" : "☆ Set as favorite"}</button>
+    <small id="acc-error" class="bad"></small>`;
+  if (res.is_favorite) return;
+  $("#acc-favorite").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Switching…";
+    let done;
+    try {
+      done = await getJSON("/api/account/favorite", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ riot_id: res.name }),
+      });
+    } catch {
+      done = { ok: false, error: "Could not reach the app. Is it still running?" };
+    }
+    if (done.ok) {
+      accBox.hidden = true;
+      $("#acc-input").value = "";
+    } else {
+      e.target.disabled = false;
+      e.target.textContent = "☆ Set as favorite";
+      $("#acc-error").textContent = done.error;
+    }
+  });
+});
+document.addEventListener("click", (ev) => { if (!ev.target.closest("#acc-search")) accBox.hidden = true; });
+$("#acc-input").addEventListener("keydown", (ev) => { if (ev.key === "Escape") accBox.hidden = true; });
 
 // ---------------------------------------------------------------- champ select
 let csWasLocked = false;
 let buildChamp = null; // boneco da build no ecrã
 let csEnemyRole = {}; // nome do boneco inimigo -> posição provável
 let csLast = null;
+let gameShown = null; // jogo a decorrer no ecrã
+let gameMe = null;
 
 function slotHtml({ champ, label, name, me, hover }) {
   const bg = champ?.icon ? `style="background-image:url('${champ.icon}')"` : "";
@@ -160,6 +230,7 @@ function renderSides(cs) {
 
 function renderChampSelect(cs) {
   csLast = cs;
+  endGameView();
   $("#cs-idle").hidden = true;
   $("#cs-ingame").hidden = true;
   $("#cs-live").hidden = false;
@@ -179,8 +250,58 @@ function renderChampSelect(cs) {
 }
 
 // jogo a começar: atalho para os mains do boneco que escolheste
+function endGameView() {
+  gameShown = null; gameMe = null;
+  $("#tab-cs").classList.remove("game-on");
+  $("#cs-game").hidden = true;
+}
+
+const ROLE_ORDER = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"];
+
+function gameCard(p) {
+  const rank = p.rank
+    ? `<span>${rankName(p.rank)} ${p.rank.lp} LP</span><small>${pct(p.rank.winrate)} WR · ${p.rank.wins}W ${p.rank.losses}L</small>`
+    : `<small>${p.loading && !p.perf ? "Loading rank…" : p.name === "Hidden player" || p.bot ? "" : "Unranked"}</small>`;
+  const f = p.perf;
+  const c = f?.champ;
+  const champLine = !f ? (p.loading ? "<small>Loading games…</small>" : "")
+    : c ? `<small>${c.games} of last ${f.games} on ${esc(p.champion.name)}: ${pct(c.winrate)} WR · ${num(c.kda)} KDA</small>`
+    : `<small>Not in the last ${f.games} ranked games</small>`;
+  const recent = f?.games ? `<small>Last ${f.games} ranked: ${f.wins}W ${f.games - f.wins}L</small>` : "";
+  const mastery = p.mastery ? `<small>Mastery ${p.mastery.level} · ${fmtK(p.mastery.points)} pts</small>` : "";
+  return `<article class="lcard ${p.me ? "me" : ""}">
+    <div class="lcard-art" ${p.champion.art ? `style="background-image:url('${p.champion.art}')"` : ""}>
+      ${p.role ? `<span class="lcard-role">${POS_PT[p.role]}${p.role_source === "likely" ? " <small>likely</small>" : ""}</span>` : ""}
+      <div class="lcard-kit">${[...p.spells, p.keystone].filter((x) => x?.icon).map((x) => `<img src="${x.icon}" title="${esc(x.name)}" alt="">`).join("")}</div>
+    </div>
+    <div class="lcard-body">
+      <span class="champ">${esc(p.champion.name)}</span>
+      <span class="who" title="${esc(p.name)}">${esc(p.name)}${p.me ? " · You" : ""}</span>
+      ${rank}${mastery}${champLine}${recent}
+    </div>
+  </article>`;
+}
+
+// o jogo começou: troca os lados do champ select pelos jogadores reais
+function renderGame(g) {
+  gameMe = g.players.find((p) => p.me) || null;
+  const myTeam = gameMe?.team ?? g.players[0]?.team;
+  const byRole = (list) => g.is_rift ? [...list].sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role)) : list;
+  $("#game-allies").innerHTML = byRole(g.players.filter((p) => p.team === myTeam)).map(gameCard).join("");
+  $("#game-enemies").innerHTML = byRole(g.players.filter((p) => p.team !== myTeam)).map(gameCard).join("");
+  $("#cs-game").hidden = false;
+  $("#tab-cs").classList.add("game-on");
+  $("#cs-idle").hidden = true;
+  $("#cs-live").hidden = false;
+  if (gameShown !== g.game_id) {
+    gameShown = g.game_id;
+    if (g.is_rift && gameMe) setCenter("build");
+    showIngame();
+  }
+}
+
 function showIngame() {
-  const champ = csLast?.allies.find((a) => a.me)?.champion;
+  const champ = gameMe?.champion || csLast?.allies.find((a) => a.me)?.champion;
   const btn = $("#ingame-mains");
   btn.hidden = !champ;
   if (champ) {
@@ -194,6 +315,7 @@ function resetChampSelect() {
   csLast = null; csEnemyRole = {}; csWasLocked = false; buildChamp = null;
   $("#cs-live").hidden = true; $("#cs-idle").hidden = false; $("#cs-ingame").hidden = true;
   $("#cs-mains").innerHTML = ""; $("#build").innerHTML = "";
+  endGameView();
   setCenter("mine");
   renderSides(null);
 }
@@ -255,7 +377,11 @@ function renderCounters(p) {
 
 // ---------------------------------------------------------------- árvore de runas
 let RUNES = null;
-getJSON("/api/runes").then((d) => (RUNES = d));
+let lastBuild = null;
+getJSON("/api/runes").then((d) => {
+  RUNES = d;
+  if (lastBuild) renderBuild(lastBuild); // a build chegou antes das runas: desenha a árvore
+});
 
 function runeTree(r) {
   if (!RUNES) return "";
@@ -333,9 +459,10 @@ function buildDetailHtml(b) {
 }
 
 function renderBuild(b) {
+  lastBuild = b;
   buildChamp = b.champion.id;
   $$('#center-tabs [data-sub="build"], #center-tabs [data-sub="mains"]').forEach((x) => (x.disabled = false));
-  $("#build-title").textContent = `${b.champion.name}${b.locked ? "" : " (hovering)"} · ${b.scope} · based on ${fmtN(b.sample)} high elo games`;
+  $("#build-title").textContent = `${b.champion.name}${b.locked ? "" : " (hovering)"}${b.position ? ` · ${POS_PT[b.position]}` : ""} · ${b.scope} · based on ${fmtN(b.sample)} games${b.from_game ? " · updated for this game" : ""}`;
   const parts = [];
   if (b.matchup) {
     const m = b.matchup;
@@ -967,7 +1094,7 @@ function renderCsMains(rep) {
   $("#cs-mains").innerHTML = `
     <p class="muted">Top 5 <strong>${esc(rep.champion.name)}</strong> mains (most mastery points, Challenger/GM EUW + KR)</p>
     ${mainsTable(rep, true)}
-    ${rep.sample ? `<details><summary>Mains' runes and build (${rep.sample} games)</summary>${buildDetailHtml(rep)}</details>` : ""}`;
+    ${rep.sample ? `<details><summary>Mains' runes and build · ${POS_PT[rep.position] || ""} (${rep.sample} games)</summary>${buildDetailHtml(rep)}</details>` : ""}`;
 }
 
 async function loadMainsList() {
@@ -1042,7 +1169,7 @@ async function openMains(id, quiet = false) {
     ${mainsTable(rep, false)}
     ${rep.sample ? `
       <div class="subtabs main-pick">
-        <button data-main="all" class="active">All (${rep.sample} games)</button>
+        <button data-main="all" class="active">All · ${POS_PT[rep.position] || ""} (${rep.sample} games)</button>
         ${rep.mains.map((m, i) => `<button data-main="${i}" ${m.games ? "" : "disabled"}>${i + 1}. ${esc((m.name || "?").split("#")[0])} (${m.games})</button>`).join("")}
         <button data-main="compare">Compare</button>
       </div>

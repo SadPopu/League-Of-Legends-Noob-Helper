@@ -71,13 +71,14 @@ def top_mains(db: DB, champ: int, limit: int = 5, sort: str = "points") -> list[
             WHERE m.champion_id=? ORDER BY {order} LIMIT ?""", (champ, limit))
 
 
-def mains_report(db: DB, dd: DDragon, champ: int, mains: list[dict]) -> dict:
-    """Build agregada dos jogos dos mains com este boneco, e a build de cada um."""
+def mains_report(db: DB, dd: DDragon, champ: int, mains: list[dict], position: str | None = None) -> dict:
+    """Build agregada dos jogos dos mains com este boneco, e a build de cada um.
+    As runas e itens são sempre de uma só role: a pedida ou, sem ela, a mais jogada (de todos ou de cada main)."""
     puuids = [m["puuid"] for m in mains]
     rows = db.query(
         f"""SELECT * FROM participants WHERE source='meta' AND champion_id=?
             AND puuid IN ({','.join('?' * len(puuids))})""", (champ, *puuids)) if puuids else []
-    pos = Counter(r["position"] for r in rows).most_common(1)[0][0] if rows else None
+    pos = position or (Counter(r["position"] for r in rows).most_common(1)[0][0] if rows else None)
 
     players = []
     for m in mains:
@@ -85,7 +86,8 @@ def mains_report(db: DB, dd: DDragon, champ: int, mains: list[dict]) -> dict:
         items = Counter(i for r in mine for i in set(r["items"]) if dd.is_completed_item(i) and not dd.is_boots(i))
         k, d, a = (sum(r[x] for r in mine) for x in ("kills", "deaths", "assists"))
         positions = Counter(r["position"] for r in mine)
-        build = aggregate_build(mine, dd, pos)
+        own_pos = position or (positions.most_common(1)[0][0] if positions else None)
+        build = aggregate_build([r for r in mine if r["position"] == own_pos], dd, own_pos)
         players.append({
             **m,
             "region": REGION_NAMES.get(m["platform"], m["platform"]),
@@ -99,8 +101,8 @@ def mains_report(db: DB, dd: DDragon, champ: int, mains: list[dict]) -> dict:
         })
 
     return {"champion": {"id": champ, "name": dd.champ_name(champ), "icon": dd.champ_icon(champ)},
-            "mains": players, "last_refresh": db.kv_get(f"mains_games:{champ}"),
-            **aggregate_build(rows, dd, pos)}
+            "mains": players, "last_refresh": db.kv_get(f"mains_games:{champ}"), "position": pos,
+            **aggregate_build([r for r in rows if r["position"] == pos], dd, pos)}
 
 
 def games_stale(db: DB, champ: int) -> bool:
