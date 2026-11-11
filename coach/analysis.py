@@ -307,6 +307,10 @@ def recommend_build(state: ChampSelectState, db: DB, dd: DDragon) -> dict:
     result["timeline"] = timeline_build(tl_rows, dd, pos) if tl_rows else None
     if result["timeline"]:
         result["timeline"]["scope"] = tl_scope
+    # botas: só os jogos com compras dizem se foram vendidas, por isso usam os mesmos jogos da ordem de itens
+    result["boots_usage"] = boots_usage(tl_rows, dd)
+    if result["boots_usage"]:
+        result["boots_usage"]["scope"] = tl_scope
 
     if opp:
         g, w = matchup(db, "meta", champ, opp, pos)

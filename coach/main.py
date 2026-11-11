@@ -17,13 +17,14 @@ from . import config
 from .analysis import my_champion_stats, recommend_build, recommend_counters, recommend_picks
 from .champselect import ChampSelectState, mock_session, parse_session
 from .data import collect_new_games, crawl_meta
-from .ingame import (RIFT_MAP, assign_roles, fetch_basics, fetch_performance, live_positions, players_from_game,
-                     public_player)
+from .ingame import (RIFT_MAP, apply_skins, assign_roles, fetch_basics, fetch_performance, live_data,
+                     players_from_game, public_player)
 from .history import QUEUE_GROUPS, QUEUE_NAMES, store_match, sync_history
 from .db import DB
 from .ddragon import DDragon
 from .lcu import LCU
 from .mains import crawl_mastery, ensure_names, games_stale, mains_report, refresh_main_games, top_mains
+from .player import STATS_GAMES, match_page, store_games, viewed_stats
 from .postgame import analyse_match
 from .profile import QUEUES, game_lp, lp_series, rank_view
 from .riot_api import RiotAPI, RiotAPIError, background_job
@@ -81,7 +82,7 @@ class Coach:
     def status(self) -> dict:
         return {"type": "status", "lcu": self.lcu.connected, "me": self.me, "phase": self.phase,
                 "riot_key": bool(config.RIOT_API_KEY), "jobs": self.jobs, "version": self.dd.version,
-                "build": APP_BUILD}
+                "build": APP_BUILD, "platform": config.PLATFORM}
 
     async def push_status(self):
         await self.send(self.status())
@@ -315,18 +316,27 @@ class Coach:
             await publish()
 
         async def follow_live():
+            skins_shown = False
             for _ in range(LIVE_POSITION_TRIES):
-                found = await live_positions(self.dd)
+                found, skins = await live_data(self.dd)
+                if skins and not skins_shown:
+                    skins_shown = True
+                    await apply_skins(self.dd, players, skins)
+                    await publish()
                 if found:
                     known.update(found)
                     await update_roles()
                     await publish()
+                if found or (skins_shown and not is_rift):
                     return
                 await asyncio.sleep(LIVE_POSITION_WAIT)
 
         await update_roles()
+        if self.cs_state and me:  # as skins da tua equipa já se sabem do champ select
+            await apply_skins(self.dd, players, {(me["team"], a["champion"]): a.get("skin", 0)
+                                                 for a in self.cs_state.allies if a["champion"]})
         await publish()
-        await asyncio.gather(enrich(), *([follow_live()] if watch_live and is_rift else []))
+        await asyncio.gather(enrich(), *([follow_live()] if watch_live else []))
 
     async def update_game_build(self, players: list[dict]):
         """Refaz a build com a role e o adversário reais; se nada mudou, não faz nada."""
@@ -630,29 +640,38 @@ async def sync():
 
 
 # ---------------------------------------------------------------- pesquisa de contas e favorita
-async def lookup_account(riot_id: str) -> dict:
-    """Procura um Riot ID no servidor da app. Devolve {"ok": False, "error": ...} se não der para o usar."""
+def api_of(platform: str) -> RiotAPI | None:
+    if platform == config.PLATFORM:
+        return coach.riot
+    return coach.api_for(platform) if platform in config.META_PLATFORMS else None
+
+
+async def lookup_account(riot_id: str, api: RiotAPI | None = None) -> dict:
+    """Procura um Riot ID num servidor (por omissão o da app). Devolve {"ok": False, "error": ...} se não der para o usar."""
+    api = api or coach.riot
     name, _, tag = riot_id.strip().partition("#")
     name, tag = name.strip(), tag.strip()
     if not name or not tag:
         return {"ok": False, "error": "Type the full Riot ID, like Name#TAG"}
-    if not tag.isalnum():  # a Riot responde com erro de servidor em vez de "não existe"
+    if not tag.replace(" ", "").isalnum():  # a Riot responde com erro de servidor em vez de "não existe"
         return {"ok": False, "error": f"No account called {name}#{tag}"}
     try:
-        acc = await coach.riot.account_by_riot_id(name, tag)
+        acc = await api.account_by_riot_id(name, tag)
         if not acc:
             return {"ok": False, "error": f"No account called {name}#{tag}"}
         full_name = f"{acc['gameName']}#{acc['tagLine']}"
-        summ = await coach.riot.summoner_by_puuid(acc["puuid"])
+        summ = await api.summoner_by_puuid(acc["puuid"])
         if not summ:  # a conta existe mas joga noutro servidor: os jogos dela não se encontram com esta região
-            return {"ok": False, "error": f"{full_name} doesn't play on this server ({config.PLATFORM.upper()})"}
-        entries = await coach.riot.league_entries_by_puuid(acc["puuid"])
+            return {"ok": False, "error": f"{full_name} doesn't play on this server ({api.platform.upper()})"}
+        entries = await api.league_entries_by_puuid(acc["puuid"])
     except RiotAPIError as e:
         return {"ok": False, "error": str(e)}
     except httpx.HTTPStatusError:  # a Riot recusa nomes com caracteres inválidos
         return {"ok": False, "error": f"No account called {name}#{tag}"}
-    solo = next((e for e in entries if e.get("queueType") == QUEUES["solo"]), None)
+    by_queue = {e.get("queueType"): e for e in entries}
+    solo = by_queue.get(QUEUES["solo"])
     return {"ok": True, "puuid": acc["puuid"], "name": full_name, "level": summ.get("summonerLevel"),
+            "ranks": {k: rank_view(by_queue.get(q)) for k, q in QUEUES.items()},
             "icon": f"https://ddragon.leagueoflegends.com/cdn/{coach.dd.version}/img/profileicon/{summ['profileIconId']}.png"
                     if summ.get("profileIconId") is not None else None,
             "rank": rank_view(solo), "is_favorite": full_name.lower() == (coach.db.kv_get(FAVORITE_KEY) or "").lower()}
@@ -689,8 +708,8 @@ async def account_favorite(params: FavoriteParams):
 
 
 # ---------------------------------------------------------------- histórico
-def _history_where(group: str, champion: int | None):
-    where, args = ["puuid=?", "remake=0"], [coach.me.get("puuid")]
+def _history_where(group: str, champion: int | None, puuid: str | None = None):
+    where, args = ["puuid=?", "remake=0"], [puuid or coach.me.get("puuid")]
     if group in QUEUE_GROUPS or group == "other":
         where.append("grp=?")
         args.append(group)
@@ -700,7 +719,8 @@ def _history_where(group: str, champion: int | None):
     return " AND ".join(where), args
 
 
-def _player_view(p: dict) -> dict:
+def _player_view(p: dict, subject: str | None = None) -> dict:
+    """`subject` é o jogador cuja página está aberta (por omissão a tua conta): é ele que fica destacado."""
     dd = coach.dd
     return {
         **p,
@@ -710,64 +730,117 @@ def _player_view(p: dict) -> dict:
         "keystone": {"name": dd.perks.get(p["keystone"], ""), "icon": dd.perk_icons.get(p["keystone"], "")}
                     if p.get("keystone") else None,
         "sub_style": {"icon": dd.perk_icons.get(p["sub_style"], "")} if p.get("sub_style") else None,
-        "is_me": p["puuid"] == coach.me.get("puuid"),
+        "is_me": p["puuid"] == (subject or coach.me.get("puuid")),
     }
 
 
-def _teams_compact(players: list[dict]) -> list[list[dict]]:
+def _teams_compact(players: list[dict], subject: str | None = None) -> list[list[dict]]:
     teams: dict = {}
     for p in players:
         teams.setdefault(p["team"], []).append(
-            {"name": p["name"].split("#")[0], "icon": coach.dd.champ_icon(p["champion_id"]),
-             "is_me": p["puuid"] == coach.me.get("puuid")})
+            {"name": p["name"].split("#")[0], "riot_id": p["name"], "icon": coach.dd.champ_icon(p["champion_id"]),
+             "is_me": p["puuid"] == (subject or coach.me.get("puuid"))})
     return list(teams.values())
+
+
+def _games_view(rows: list[dict], puuid: str, lp_by_game: dict) -> list[dict]:
+    games = []
+    for r in rows:
+        d = json.loads(r["data"])
+        me = next((p for p in d["players"] if p["puuid"] == puuid), None)
+        if not me:
+            continue
+        games.append({
+            "match_id": d["match_id"], "queue": QUEUE_NAMES.get(d["queue_id"], f"Queue {d['queue_id']}"),
+            "game_creation": d["game_creation"], "duration": d["duration"],
+            # a análise pós-jogo (mapa, farm, lane...) só faz sentido no Summoner's Rift
+            "analysable": not d.get("remake") and any(d["queue_id"] in QUEUE_GROUPS[g] for g in ("solo", "flex", "normal")),
+            "has_report": coach.db.postgame(d["match_id"], puuid) is not None,
+            "lp": lp_by_game.get(d["match_id"]),
+            "me": _player_view(me, puuid), "teams": _teams_compact(d["players"], puuid),
+        })
+    return games
+
+
+def _history_totals(table: str, where: str, args: list) -> dict:
+    summary = coach.db.query(
+        f"""SELECT COUNT(*) games, SUM(win) wins, AVG(kills) k, AVG(deaths) d, AVG(assists) a,
+                   AVG(cs*60.0/duration) cspm, AVG(damage) dmg, AVG(gold) gold, AVG(vision) vision,
+                   AVG(kp) kp, AVG(score) score, SUM(badge='MVP') mvp, SUM(badge='ACE') ace
+            FROM {table} WHERE {where}""", args)[0]
+    top = coach.db.query(
+        f"""SELECT champion_id, COUNT(*) g, SUM(win) w, AVG(kills) k, AVG(deaths) d, AVG(assists) a
+            FROM {table} WHERE {where} GROUP BY champion_id ORDER BY g DESC LIMIT 5""", args)
+    for t in top:
+        t["name"], t["icon"] = coach.dd.champ_name(t["champion_id"]), coach.dd.champ_icon(t["champion_id"])
+    return {"summary": summary, "top_champions": top}
 
 
 @app.get("/api/history")
 async def history(group: str = "all", offset: int = 0, limit: int = 20, champion: int | None = None):
     where, args = _history_where(group, champion)
+    me = coach.me.get("puuid")
     rows = coach.db.query(
         f"SELECT data FROM history WHERE {where} ORDER BY game_creation DESC LIMIT ? OFFSET ?",
         (*args, limit, offset))
-    lp_by_game = game_lp(coach.db, coach.me.get("puuid"))
-    games = []
-    for r in rows:
-        d = json.loads(r["data"])
-        me = next((p for p in d["players"] if p["puuid"] == coach.me.get("puuid")), None)
-        if not me:
-            continue
-        games.append({
-            "match_id": d["match_id"], "queue": QUEUE_NAMES.get(d["queue_id"], f"Fila {d['queue_id']}"),
-            "game_creation": d["game_creation"], "duration": d["duration"],
-            # a análise pós-jogo (mapa, farm, lane...) só faz sentido no Summoner's Rift
-            "analysable": not d.get("remake") and any(d["queue_id"] in QUEUE_GROUPS[g] for g in ("solo", "flex", "normal")),
-            "has_report": coach.db.postgame(d["match_id"]) is not None,
-            "lp": lp_by_game.get(d["match_id"]),
-            "me": _player_view(me), "teams": _teams_compact(d["players"]),
-        })
-    summary = coach.db.query(
-        f"""SELECT COUNT(*) games, SUM(win) wins, AVG(kills) k, AVG(deaths) d, AVG(assists) a,
-                   AVG(cs*60.0/duration) cspm, AVG(damage) dmg, AVG(gold) gold, AVG(vision) vision,
-                   AVG(kp) kp, AVG(score) score, SUM(badge='MVP') mvp, SUM(badge='ACE') ace
-            FROM history WHERE {where}""", args)[0]
     counts = {r["grp"]: r["n"] for r in coach.db.query(
-        "SELECT grp, COUNT(*) n FROM history WHERE puuid=? AND remake=0 GROUP BY grp", (coach.me.get("puuid"),))}
-    top = coach.db.query(
-        f"""SELECT champion_id, COUNT(*) g, SUM(win) w, AVG(kills) k, AVG(deaths) d, AVG(assists) a
-            FROM history WHERE {where} GROUP BY champion_id ORDER BY g DESC LIMIT 5""", args)
-    for t in top:
-        t["name"], t["icon"] = coach.dd.champ_name(t["champion_id"]), coach.dd.champ_icon(t["champion_id"])
-    return {"games": games, "summary": summary, "counts": counts, "top_champions": top}
+        "SELECT grp, COUNT(*) n FROM history WHERE puuid=? AND remake=0 GROUP BY grp", (me,))}
+    return {"games": _games_view(rows, me, game_lp(coach.db, me)), "counts": counts,
+            **_history_totals("history", where, args)}
+
+
+# ---------------------------------------------------------------- página de outro jogador
+@app.get("/api/player")
+async def player(riot_id: str, platform: str = config.PLATFORM):
+    api = api_of(platform)
+    if not api:
+        return {"ok": False, "error": f"Unknown server: {platform}"}
+    return await lookup_account(riot_id, api)
+
+
+@app.get("/api/player/history")
+async def player_history(puuid: str, platform: str = config.PLATFORM, group: str = "all", offset: int = 0, limit: int = 20):
+    api = api_of(platform)
+    if not api:
+        return {"ok": False, "error": f"Unknown server: {platform}"}
+    limit = max(1, min(limit, 100))
+    try:
+        ids = await match_page(api, puuid, group, offset, limit)
+    except (RiotAPIError, httpx.HTTPStatusError) as e:
+        log.warning("Player history: %s", e)
+        return {"ok": False, "error": "Could not load this player's games from Riot."}
+    await store_games(api, coach.db, puuid, ids)
+    rows = coach.db.query(
+        f"""SELECT data FROM viewed_history WHERE puuid=? AND remake=0 AND match_id IN ({','.join('?' * len(ids))})
+            ORDER BY game_creation DESC""", (puuid, *ids)) if ids else []
+    where, args = _history_where(group, None, puuid)
+    return {"ok": True, "games": _games_view(rows, puuid, {}), "counts": {},
+            "next_offset": offset + limit, "has_more": len(ids) == limit,
+            **_history_totals("viewed_history", where, args)}
+
+
+@app.get("/api/player/stats")
+async def player_stats(puuid: str, platform: str = config.PLATFORM, position: str | None = None):
+    api = api_of(platform)
+    if api:
+        try:
+            await store_games(api, coach.db, puuid, await match_page(api, puuid, "solo", 0, STATS_GAMES))
+        except (RiotAPIError, httpx.HTTPStatusError) as e:  # mostra o que já estiver carregado
+            log.warning("Player stats: %s", e)
+    rows, loaded = viewed_stats(coach.db, puuid, position or None)
+    for r in rows:
+        r["name"], r["icon"] = coach.dd.champ_name(r["champion_id"]), coach.dd.champ_icon(r["champion_id"])
+    return {"champions": rows, "loaded": loaded}
 
 
 @app.get("/api/history/{match_id}")
-async def history_detail(match_id: str):
+async def history_detail(match_id: str, puuid: str | None = None):
     d = coach.db.history_detail(match_id)
     if not d:
         return {"ok": False}
     teams: dict = {}
     for p in d["players"]:
-        teams.setdefault(p["team"], []).append(_player_view(p))
+        teams.setdefault(p["team"], []).append(_player_view(p, puuid))
     return {
         "ok": True, "match_id": match_id, "queue": QUEUE_NAMES.get(d["queue_id"], ""),
         "duration": d["duration"],
@@ -906,8 +979,28 @@ async def postgame_list():
     return coach.db.postgames()
 
 
+async def analyse_viewed(match_id: str, puuid: str) -> dict:
+    """Análise de um jogo de outro jogador: não mexe no teu histórico nem salta para outra página."""
+    api = api_of(match_id.split("_")[0].lower())
+    if not api:
+        return {"ok": False, "error": "This game is from a server the app doesn't know."}
+    try:
+        match = await api.match(match_id)
+        if not match or puuid not in match["metadata"]["participants"]:
+            return {"ok": False, "error": "Could not find this player in the game."}
+        timeline = await api.timeline(match_id)
+    except (RiotAPIError, httpx.HTTPStatusError) as e:
+        log.warning("Player analysis: %s", e)
+        return {"ok": False, "error": "Could not load this game from Riot."}
+    report = await asyncio.to_thread(analyse_match, match, timeline, puuid, coach.db, coach.dd)
+    coach.db.save_postgame(match_id, puuid, report)
+    return {"ok": True, "report": report}
+
+
 @app.post("/api/postgame/analyse")
-async def postgame_analyse(match_id: str | None = None):
+async def postgame_analyse(match_id: str | None = None, puuid: str | None = None):
+    if puuid and match_id:
+        return await analyse_viewed(match_id, puuid)
     await coach.resolve_me()
     if not coach.me:
         return {"ok": False, "error": "Unknown account: search for your Riot ID at the top of the page"}
@@ -928,8 +1021,8 @@ async def postgame_analyse(match_id: str | None = None):
 
 
 @app.get("/api/postgame/{match_id}")
-async def postgame_get(match_id: str):
-    return {"ok": True, "report": coach.db.postgame(match_id)}
+async def postgame_get(match_id: str, puuid: str | None = None):
+    return {"ok": True, "report": coach.db.postgame(match_id, puuid)}
 
 
 # ---------------------------------------------------------------- perfil

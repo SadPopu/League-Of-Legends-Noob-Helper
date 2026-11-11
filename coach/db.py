@@ -45,6 +45,18 @@ CREATE TABLE IF NOT EXISTS history (    -- os teus jogos, de cada conta tua (puu
     data TEXT,                       -- resumo do jogo com os 10 jogadores (json)
     PRIMARY KEY (match_id, puuid)
 );
+CREATE TABLE IF NOT EXISTS viewed_history (    -- jogos de outros jogadores que abriste (apagados ao fim de 30 dias)
+    match_id TEXT NOT NULL,
+    puuid TEXT NOT NULL,
+    grp TEXT,
+    queue_id INTEGER, game_creation INTEGER, duration INTEGER, remake INTEGER,
+    win INTEGER, champion_id INTEGER, kills INTEGER, deaths INTEGER, assists INTEGER,
+    cs INTEGER, gold INTEGER, damage INTEGER, vision INTEGER, kp REAL, score REAL, badge TEXT,
+    data TEXT,
+    fetched INTEGER DEFAULT (strftime('%s', 'now')),
+    PRIMARY KEY (match_id, puuid)
+);
+CREATE INDEX IF NOT EXISTS idx_viewed_player ON viewed_history(puuid, grp, game_creation);
 CREATE TABLE IF NOT EXISTS mains (
     puuid TEXT NOT NULL,
     champion_id INTEGER NOT NULL,
@@ -77,6 +89,9 @@ CREATE TABLE IF NOT EXISTS postgame (
 """
 
 JSON_COLS = ("perks", "spells", "items", "purchases", "jungle")
+VIEWED_KEEP_SECONDS = 30 * 86400
+HISTORY_COLS = ("match_id, puuid, grp, queue_id, game_creation, duration, remake, win, champion_id, kills, deaths, "
+                "assists, cs, gold, damage, vision, kp, score, badge, data")
 
 # colunas acrescentadas depois da primeira versão (bases de dados antigas)
 MIGRATIONS = {
@@ -98,6 +113,7 @@ class DB:
         self.conn.commit()
         self._per_account()
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_history_grp ON history(puuid, grp, game_creation)")
+        self.conn.execute(f"DELETE FROM viewed_history WHERE fetched < strftime('%s', 'now') - {VIEWED_KEEP_SECONDS}")
         self.conn.commit()
         # conta ativa: as tuas estatísticas, histórico e relatórios são só os desta conta
         self.me_puuid: str | None = None
@@ -223,10 +239,14 @@ class DB:
         return self.conn.execute("SELECT 1 FROM history WHERE match_id=? AND puuid=?",
                                  (match_id, puuid)).fetchone() is not None
 
-    def save_history(self, summary: dict, me: dict, grp: str):
+    def has_viewed(self, match_id: str, puuid: str) -> bool:
+        return self.conn.execute("SELECT 1 FROM viewed_history WHERE match_id=? AND puuid=?",
+                                 (match_id, puuid)).fetchone() is not None
+
+    def save_history(self, summary: dict, me: dict, grp: str, table: str = "history"):
         with self.conn:
             self.conn.execute(
-                "INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                f"INSERT OR REPLACE INTO {table} ({HISTORY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (summary["match_id"], me["puuid"], grp, summary["queue_id"], summary["game_creation"],
                  summary["duration"], int(summary["remake"]), int(me["win"]), me["champion_id"], me["kills"],
                  me["deaths"], me["assists"], me["cs"], me["gold"], me["damage"], me["vision"], me["kp"],
@@ -234,7 +254,9 @@ class DB:
             )
 
     def history_detail(self, match_id: str) -> dict | None:
-        r = self.conn.execute("SELECT data FROM history WHERE match_id=? LIMIT 1", (match_id,)).fetchone()
+        r = self.conn.execute("""SELECT data FROM history WHERE match_id=?
+                                 UNION ALL SELECT data FROM viewed_history WHERE match_id=? LIMIT 1""",
+                              (match_id, match_id)).fetchone()
         return json.loads(r["data"]) if r else None
 
     def save_rank(self, puuid: str, entry: dict, ts: int):
@@ -281,7 +303,7 @@ class DB:
                                  (self.me_puuid, limit))
         return [json.loads(r["report"]) for r in rows]
 
-    def postgame(self, match_id: str) -> dict | None:
+    def postgame(self, match_id: str, puuid: str | None = None) -> dict | None:
         r = self.conn.execute("SELECT report FROM postgame WHERE match_id=? AND puuid=?",
-                              (match_id, self.me_puuid)).fetchone()
+                              (match_id, puuid or self.me_puuid)).fetchone()
         return json.loads(r["report"]) if r else None

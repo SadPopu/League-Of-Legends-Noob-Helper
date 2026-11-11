@@ -38,7 +38,9 @@ def parse_session(s: dict) -> ChampSelectState:
         champ = p.get("championId") or p.get("championPickIntent") or 0
         locked = p.get("cellId") in completed_pick_cells
         pos = (p.get("assignedPosition") or "").upper()
-        st.allies.append({"champion": champ, "position": pos, "me": me, "locked": locked})
+        # selectedSkinId = boneco * 1000 + número da skin
+        st.allies.append({"champion": champ, "position": pos, "me": me, "locked": locked,
+                          "skin": (p.get("selectedSkinId") or 0) % 1000})
         if me:
             st.my_position, st.my_champion, st.locked = pos, champ, locked
 

@@ -243,8 +243,9 @@ def _feedback(m: dict, pos: str, me: dict, db: DB, deaths: list[dict]) -> list[d
         add("info", f"First completed item ({fi['name']}) only at {fi['minute']} min. More farm or more efficient recalls get you there sooner.")
 
     section("compare")
+    # as médias guardadas são só as da conta ativa: não servem para comparar outro jogador
     mine = next((s for s in my_champion_stats(db, pos or None) if s["champion_id"] == me["championId"]), None)
-    if mine and mine["games"] >= 5:
+    if mine and mine["games"] >= 5 and me["puuid"] == db.me_puuid:
         diff = m["cspm"] - mine["cspm"]
         if abs(diff) >= 1 and pos != "UTILITY":
             add("info", f"CS/min {'above' if diff > 0 else 'below'} your average on this champion ({mine['cspm']:.1f}).")

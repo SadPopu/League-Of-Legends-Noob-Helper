@@ -11,7 +11,8 @@ BASE = "https://ddragon.leagueoflegends.com"
 SHARD_ROWS = [[5008, 5005, 5007], [5008, 5010, 5001], [5011, 5013, 5001]]
 SHARD_ICONS = {
     5008: "StatModsAdaptiveForceIcon", 5005: "StatModsAttackSpeedIcon", 5007: "StatModsCDRScalingIcon",
-    5010: "StatModsMovementSpeedIcon", 5001: "StatModsHealthScalingIcon", 5011: "StatModsHealthPlusIcon",
+    # os nomes dos ficheiros da Riot estão ao contrário do que parece: 5001 (scaling) usa o "Plus" e 5011 (flat) o "Scaling"
+    5010: "StatModsMovementSpeedIcon", 5001: "StatModsHealthPlusIcon", 5011: "StatModsHealthScalingIcon",
     5013: "StatModsTenacityIcon",
 }
 
@@ -34,6 +35,22 @@ class DDragon:
         self.rune_styles: list[dict] = []
         self.spell_icons: dict[int, str] = {}
         self.perk_icons: dict[int, str] = {}
+        self.skin_nums: dict[str, list[int]] = {}  # "Ahri" -> números das skins que têm arte
+
+    async def skin_art(self, cid: int, skin: int) -> str | None:
+        """A arte de loading da skin. Os cromas não têm arte própria: usa a da skin de que são variação."""
+        key = self.champs.get(cid, {}).get("key")
+        if not key:
+            return None
+        if key not in self.skin_nums:
+            try:
+                async with httpx.AsyncClient(timeout=5) as c:
+                    r = await c.get(f"{BASE}/cdn/{self.version}/data/en_US/champion/{key}.json")
+                self.skin_nums[key] = sorted(s["num"] for s in r.json()["data"][key]["skins"])
+            except (httpx.HTTPError, ValueError, KeyError):
+                return None  # sem saber que skins existem, fica a arte que já lá está
+        num = max((n for n in self.skin_nums[key] if n <= skin), default=0)
+        return f"{BASE}/cdn/img/champion/loading/{key}_{num}.jpg"
 
     async def load(self):
         cache = DATA_DIR / "ddragon.json"

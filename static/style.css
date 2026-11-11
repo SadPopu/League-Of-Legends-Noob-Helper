@@ -452,9 +452,27 @@ body[data-tab="cs"] .fab { display: flex; }
 .mains-games { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .mains-games small { color: var(--muted); font-size: 12px; }
 .mains-table td { padding: 5px 8px; }
-#cs-mains details { margin-top: 8px; }
-.main-pick { flex-wrap: wrap; margin-top: 14px; }
-.main-pick button:disabled { opacity: .4; }
+.cs-mains-head { display: flex; align-items: center; gap: 10px; }
+.cs-mains-head p { margin: 0 auto 0 0; }
+.main-name { background: none; border: 0; padding: 0; color: var(--text, inherit); font: inherit; font-weight: 700; cursor: pointer; }
+.main-name:hover:not(:disabled) { color: var(--gold-2); text-decoration: underline; }
+.main-name:disabled { cursor: default; opacity: .6; }
+.plink-go { margin-left: 6px; color: var(--muted); }
+.mains-table tr.selected td { background: rgba(240, 201, 106, .16); box-shadow: inset 0 1px 0 var(--gold), inset 0 -1px 0 var(--gold); }
+.mains-table tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--gold-2), inset 0 1px 0 var(--gold), inset 0 -1px 0 var(--gold); }
+.mains-table tr.selected .main-name { color: var(--gold-2); }
+button.secondary.active { background: rgba(200, 170, 110, .22); color: var(--gold-2); border-color: var(--gold); }
+.main-build-head { display: flex; align-items: center; gap: 8px; margin: 14px 0 8px; }
+.main-build-head .icon-btn { margin-left: auto; font-size: 12.5px; }
+.plink { color: inherit; text-decoration: none; }
+.plink:hover { color: var(--gold-2); text-decoration: underline; }
+.g-teams .plink, .lcard-body .plink, .pname .plink { overflow: hidden; text-overflow: ellipsis; }
+#player-refresh, .back-link { display: none; }
+body.viewing #player-refresh { display: inline-block; }
+body.viewing .back-link { display: inline; font-size: 12.5px; text-decoration: none; }
+body.viewing #sync, body.viewing [data-jobview="sync"], body.viewing .lp-card { display: none; }
+body.viewing .profile-top { grid-template-columns: 1fr; }
+body.viewing .ranks { grid-template-columns: 1fr 1fr; }
 .compare th, .compare td { vertical-align: top; white-space: normal; }
 .compare tbody th { color: var(--gold); font-weight: 600; }
 .compare td { min-width: 130px; }

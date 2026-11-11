@@ -17,6 +17,16 @@ const ago = (ts) => {
 };
 const isActive = (tab) => document.body.dataset.tab === tab;
 
+// nomes de jogadores: cada Riot ID abre a página desse jogador
+const hasTag = (id) => /#.+/.test(id || "");
+const platformOf = (matchId) => matchId.split("_")[0].toLowerCase();
+const playerHref = (riotId, platform) => `#player/${platform}/${encodeURIComponent(riotId)}`;
+const playerLink = (riotId, platform, label = riotId) => hasTag(riotId)
+  ? `<a class="plink" href="${playerHref(riotId, platform)}" title="See ${esc(riotId)}'s profile">${esc(label)}</a>`
+  : esc(label);
+// o nome pode estar dentro de uma linha clicável: abrir o jogador não abre também a linha
+document.addEventListener("click", (ev) => { if (ev.target.closest("a.plink")) ev.stopPropagation(); }, true);
+
 // ---------------------------------------------------------------- abas
 function showTab(tab) {
   document.body.dataset.tab = tab;
@@ -27,7 +37,10 @@ function showTab(tab) {
   if (tab === "data") loadData();
   if (tab !== "cs") $("#sim-panel").hidden = true;
 }
-$$("nav button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+$$("nav button").forEach((b) => b.addEventListener("click", () => {
+  leavePlayer();
+  showTab(b.dataset.tab);
+}));
 
 // ---------------------------------------------------------------- websocket
 function connect() {
@@ -52,10 +65,11 @@ function handle(msg) {
     case "game": return renderGame(msg);
     case "champselect_end": return resetChampSelect();
     case "history_updated":
-      if (isActive("profile")) { loadProfile(); loadHistory(true); }
+      if (isActive("profile") && !viewing) { loadProfile(); loadHistory(true); }
       return;
     case "postgame":
       // jogo acabado e analisado: abre-o no histórico
+      leavePlayer();
       hist.openAfterLoad = msg.report?.match_id;
       showTab("profile");
       return;
@@ -107,6 +121,7 @@ function renderStatus(s) {
     ReadyCheck: "Match found", EndOfGame: "Post-game", PreEndOfGame: "Post-game", GameStart: "Loading" }[s.phase];
   $("#st-phase").textContent = phase || "";
   if (s.version) DD_VERSION = s.version;
+  if (s.platform) MY_PLATFORM = s.platform;
   if (!s.riot_key) $("#st-phase").textContent = "RIOT_API_KEY missing in .env";
   JOBS = s.jobs || {};
   renderJobs();
@@ -127,7 +142,7 @@ function renderStatus(s) {
 
 function refreshOpenTab() {
   if (isActive("data")) loadData();
-  if (isActive("profile")) { loadProfile(); loadHistory(true); if (!$("#prof-champs").hidden) loadStats(); }
+  if (isActive("profile") && !viewing) { loadProfile(); loadHistory(true); if (!$("#prof-champs").hidden) loadStats(); }
   if (isActive("mains")) {
     loadMainsList();
     if (mainsState.selected) openMains(mainsState.selected, true);
@@ -156,7 +171,7 @@ $("#acc-search").addEventListener("submit", async (ev) => {
   accBox.innerHTML = `
     <div class="acc-found">
       ${res.icon ? `<img src="${res.icon}" alt="">` : ""}
-      <div><strong>${esc(res.name)}</strong>
+      <div><strong>${playerLink(res.name, MY_PLATFORM)}</strong>
       <small class="muted">${res.level != null ? `Level ${res.level}` : ""}${res.rank ? ` · ${rankName(res.rank)} ${res.rank.lp} LP` : " · Unranked"}</small></div>
     </div>
     <button type="button" id="acc-favorite" ${res.is_favorite ? "disabled" : ""}>${res.is_favorite ? "★ Your favorite" : "☆ Set as favorite"}</button>
@@ -276,7 +291,7 @@ function gameCard(p) {
     </div>
     <div class="lcard-body">
       <span class="champ">${esc(p.champion.name)}</span>
-      <span class="who" title="${esc(p.name)}">${esc(p.name)}${p.me ? " · You" : ""}</span>
+      <span class="who" title="${esc(p.name)}">${playerLink(p.name, MY_PLATFORM)}${p.me ? " · You" : ""}</span>
       ${rank}${mastery}${champLine}${recent}
     </div>
   </article>`;
@@ -414,6 +429,17 @@ function questItemsHtml(b) {
   }</div>`;
 }
 
+// % de jogos com cada par de botas (as melhorias contam no par de origem)
+function bootsHtml(b) {
+  const u = b.boots_usage;
+  if (!u?.rows?.length) return "";
+  return `<h3>Boots <small>${u.scope ? `${esc(u.scope)} · ` : ""}${u.sample} detailed games</small></h3><div class="items">${
+    u.rows.slice(0, 4).map((x) => `
+      <div class="item">${x.icon ? icon(x, "ico") : `<span class="ico blank"></span>`}<span>${esc(x.name)}</span>
+      <small>${pct(x.pick_rate)} of games · ${pct(x.winrate)} WR</small></div>`).join("")
+  }</div>`;
+}
+
 function buildDetailHtml(b) {
   const parts = [];
   if (b.runes) {
@@ -426,6 +452,7 @@ function buildDetailHtml(b) {
 
   const t = b.timeline;
   parts.push(questItemsHtml(b));
+  parts.push(bootsHtml(b));
   if (t) {
     if (t.skills) {
       const p = t.skills;
@@ -475,7 +502,7 @@ function renderBuild(b) {
   parts.push(buildDetailHtml(b));
   if (b.core_items.length) {
     parts.push(`<h3>Most used items</h3><div class="items">${
-      [...(b.boots ? [{ ...b.boots, winrate: null }] : []), ...b.core_items].map((it) => `
+      [...(b.boots && !b.boots_usage ? [{ ...b.boots, winrate: null }] : []), ...b.core_items].map((it) => `
         <div class="item">${icon(it, "ico")}<span>${esc(it.name)}</span>
         <small>${pct(it.pick_rate)} of games${it.winrate != null ? ` · ${pct(it.winrate)} WR` : ""}</small></div>`).join("")
     }</div>`);
@@ -517,8 +544,58 @@ const APEX = ["MASTER", "GRANDMASTER", "CHALLENGER"];
 const emblem = (tier) => `https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-shared-components/global/default/${tier.toLowerCase()}.png`;
 const rankName = (r) => `${TIER_NAME(r.tier)}${APEX.includes(r.tier) ? "" : ` ${r.division}`}`;
 
+// ---------------------------------------------------------------- página de outro jogador
+// É a página de perfil a mostrar outra pessoa; o endereço (#player/região/Nome#TAG) diz quem.
+let viewing = null;
+let MY_PLATFORM = "euw1";
+
+function setViewing(riotId, platform) {
+  viewing = riotId ? {
+    riotId, platform,
+    ready: getJSON(`/api/player?riot_id=${encodeURIComponent(riotId)}&platform=${platform}`)
+      .catch(() => ({ ok: false, error: "Could not reach the app." })),
+  } : null;
+  document.body.classList.toggle("viewing", !!viewing);
+  // cada jogador começa no histórico completo
+  hist.group = "all";
+  $$("#hist-groups button").forEach((b) => b.classList.toggle("active", b.dataset.group === "all"));
+  $('#profile-sub [data-view="games"]').click();
+}
+
+function leavePlayer() {
+  if (viewing) setViewing(null);
+  if (location.hash) location.hash = "";
+}
+
+function route() {
+  accBox.hidden = true;
+  const m = location.hash.match(/^#player\/([^/]+)\/(.+)$/);
+  const riotId = m && decodeURIComponent(m[2]);
+  if (riotId && riotId.toLowerCase() !== (lastMe || "").toLowerCase()) {
+    if (viewing?.riotId !== riotId || viewing.platform !== m[1]) setViewing(riotId, m[1]);
+    showTab("profile");
+    window.scrollTo(0, 0);
+    return;
+  }
+  const wasViewing = !!viewing;
+  if (wasViewing) setViewing(null);
+  if (riotId || (wasViewing && isActive("profile"))) showTab("profile");
+}
+window.addEventListener("hashchange", route);
+
+$("#player-refresh").addEventListener("click", () => {
+  if (!viewing) return;
+  setViewing(viewing.riotId, viewing.platform);
+  showTab("profile");
+});
+
+const whoQuery = () => (viewing?.puuid ? `puuid=${encodeURIComponent(viewing.puuid)}` : "");
+
 async function loadProfile() {
-  const p = await getJSON("/api/profile").catch(() => ({ ok: false, error: "Could not reach the app." }));
+  const who = viewing;
+  if (who) $("#profile-card").innerHTML = `<div class="loading">Loading ${esc(who.riotId)}…</div>`;
+  const p = who ? await who.ready : await getJSON("/api/profile").catch(() => ({ ok: false, error: "Could not reach the app." }));
+  if (who !== viewing) return; // entretanto abriu-se outro jogador
   if (!p.ok) {
     $("#profile-card").innerHTML = `<p class="muted">${esc(p.error)}</p>`;
     return;
@@ -536,9 +613,11 @@ async function loadProfile() {
   $("#profile-card").innerHTML = `
     <div class="profile-id">
       <div class="avatar">${p.icon ? `<img src="${p.icon}" alt="">` : ""}${p.level ? `<span>${p.level}</span>` : ""}</div>
-      <div><h2>${esc(name)} <small class="muted">#${esc(tag || "")}</small></h2></div>
+      <div><h2>${esc(name)} <small class="muted">#${esc(tag || "")}</small></h2>
+        ${who ? `<span class="tag">${REGION_NAMES[who.platform] || who.platform}</span><a class="back-link" href="#">← Back to my profile</a>` : ""}</div>
     </div>
     <div class="ranks">${rankBox("Ranked Solo/Duo", p.ranks.solo)}${rankBox("Ranked Flex", p.ranks.flex)}</div>`;
+  if (who) return; // a Riot não guarda LP: o gráfico só existe para a tua conta, que a app vai registando
   PROFILE = p;
   loadLp();
 }
@@ -635,7 +714,21 @@ $$("#profile-sub button").forEach((b) => b.addEventListener("click", () => {
 
 async function loadStats() {
   const pos = $("#stats-pos").value;
-  const data = await getJSON(`/api/stats${pos ? `?position=${pos}` : ""}`);
+  const who = viewing;
+  let url = `/api/stats${pos ? `?position=${pos}` : ""}`;
+  if (who) {
+    $("#stats-note").textContent = "";
+    $("#stats tbody").innerHTML = `<tr><td colspan="8"><div class="loading">Loading ranked games from Riot…</div></td></tr>`;
+    const p = await who.ready;
+    if (who !== viewing) return;
+    if (!p.ok) { $("#stats tbody").innerHTML = `<tr><td colspan="8" class="muted">${esc(p.error)}</td></tr>`; return; }
+    who.puuid = p.puuid;
+    url = `/api/player/stats?${whoQuery()}&platform=${who.platform}${pos ? `&position=${pos}` : ""}`;
+  }
+  const data = await getJSON(url);
+  if (who !== viewing) return;
+  $("#stats-title").textContent = who ? "Ranked stats per champion" : "Your ranked stats per champion";
+  $("#stats-note").textContent = who ? `From the ${data.loaded} most recent ranked games loaded this season.` : "";
   $("#stats tbody").innerHTML = data.champions.map((c) => `
     <tr>
       <td>${icon(c, "ico small")} ${esc(c.name)}</td>
@@ -643,7 +736,7 @@ async function loadStats() {
       <td class="${c.winrate >= 0.55 ? "good" : c.winrate < 0.45 ? "bad" : ""}">${pct(c.winrate)}</td>
       <td>${num(c.kda, 2)}</td><td>${num(c.cspm)}</td><td>${num(c.vspm, 2)}</td>
       <td>${pct(c.kp)}</td><td>${pct(c.dmg_share)}</td>
-    </tr>`).join("") || `<tr><td colspan="8" class="muted">No ranked games yet. Click "Check for new games".</td></tr>`;
+    </tr>`).join("") || `<tr><td colspan="8" class="muted">No ranked games yet.${who ? "" : ` Click "Check for new games".`}</td></tr>`;
 }
 $("#stats-pos").addEventListener("change", loadStats);
 
@@ -671,22 +764,38 @@ $("#hist-more").addEventListener("click", () => loadHistory(false));
 async function loadHistory(reset) {
   if (reset) hist.offset = 0;
   const seq = ++hist.seq;
-  const data = await getJSON(`/api/history?group=${hist.group}&offset=${hist.offset}&limit=20`);
+  const who = viewing;
+  let url = `/api/history?group=${hist.group}&offset=${hist.offset}&limit=20`;
+  if (who) {
+    if (reset) {
+      $("#hist-summary").innerHTML = "";
+      $("#hist-list").innerHTML = `<div class="loading">Loading games from Riot…</div>`;
+      $("#hist-more").hidden = true;
+    }
+    const p = await who.ready;
+    if (seq !== hist.seq) return;
+    if (!p.ok) { $("#hist-list").innerHTML = ""; return; } // o erro já aparece no cartão do jogador
+    who.puuid = p.puuid;
+    url = `/api/player/history?${whoQuery()}&platform=${who.platform}&group=${hist.group}&offset=${hist.offset}&limit=20`;
+  }
+  const data = await getJSON(url).catch(() => ({ ok: false, error: "Could not reach the app." }));
   if (seq !== hist.seq) return; // entretanto pediu-se outra página/filtro
+  if (data.ok === false) {
+    $("#hist-list").innerHTML = `<p class="empty">${esc(data.error)}</p>`;
+    return;
+  }
   const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
   $$("#hist-groups button").forEach((b) => {
     const n = b.dataset.group === "all" ? total : data.counts[b.dataset.group] || 0;
     b.querySelector("small").textContent = n ? `(${n})` : "";
   });
-  if (reset) {
-    renderHistSummary(data);
-    $("#hist-list").innerHTML = "";
-  }
+  if (reset || who) renderHistSummary(data); // de outro jogador, o resumo cresce com os jogos carregados
+  if (reset) $("#hist-list").innerHTML = "";
   data.games.forEach((g) => (GAMES[g.match_id] = g));
   $("#hist-list").insertAdjacentHTML("beforeend", data.games.map(gameRow).join("") ||
-    (reset ? `<p class="empty">No games here yet. Click "Check for new games".</p>` : ""));
-  hist.offset += data.games.length;
-  $("#hist-more").hidden = data.games.length < 20;
+    (reset ? `<p class="empty">${who ? "No games in this queue this season." : `No games here yet. Click "Check for new games".`}</p>` : ""));
+  hist.offset = data.next_offset ?? hist.offset + data.games.length;
+  $("#hist-more").hidden = !(data.has_more ?? data.games.length >= 20);
   if (hist.openAfterLoad && GAMES[hist.openAfterLoad]) {
     const id = hist.openAfterLoad;
     hist.openAfterLoad = null;
@@ -699,7 +808,7 @@ function renderHistSummary({ summary: s, top_champions: top }) {
   const kda = (s.k + s.a) / Math.max(s.d, 1);
   $("#hist-summary").innerHTML = `
     <div class="card hist-summary">
-      <div class="big-stat"><strong>${s.games}</strong><small>games</small></div>
+      <div class="big-stat"><strong>${s.games}</strong><small>${viewing ? "games loaded" : "games"}</small></div>
       <div class="big-stat"><strong class="${s.wins / s.games >= 0.5 ? "good" : "bad"}">${pct(s.wins / s.games)}</strong><small>${s.wins}W ${s.games - s.wins}L</small></div>
       <div class="big-stat"><strong>${num(kda, 2)}</strong><small>KDA (${num(s.k)}/${num(s.d)}/${num(s.a)})</small></div>
       <div class="big-stat"><strong>${num(s.cspm)}</strong><small>CS/min</small></div>
@@ -749,7 +858,7 @@ function gameRow(g) {
       </div>
       <div class="g-items">${itemsRow(m.items)}</div>
       <div class="g-teams">${g.teams.slice(0, 2).map((t) => `<div>${t.map((p) =>
-        `<span class="${p.is_me ? "me" : ""}"><img src="${p.icon}" alt="">${esc(p.name)}</span>`).join("")}</div>`).join("")}</div>
+        `<span class="${p.is_me ? "me" : ""}"><img src="${p.icon}" alt="">${playerLink(p.riot_id, platformOf(g.match_id), p.name)}</span>`).join("")}</div>`).join("")}</div>
       <span class="chev">›</span>
     </div>
     <div class="game-detail" hidden></div>
@@ -780,16 +889,16 @@ async function toggleGame(id) {
     el.querySelectorAll(".gd-pane").forEach((p) => (p.hidden = p.dataset.v !== b.dataset.v));
     if (b.dataset.v === "map") openMap(id, el);
   }));
-  getJSON(`/api/history/${id}`).then((d) => (el.querySelector('.gd-pane[data-v="board"]').innerHTML = scoreboardHtml(d)));
+  getJSON(`/api/history/${id}?${whoQuery()}`).then((d) => (el.querySelector('.gd-pane[data-v="board"]').innerHTML = scoreboardHtml(d)));
   if (g.analysable) loadAnalysis(id, el);
 }
 
 async function loadAnalysis(id, el, force = false) {
   const pane = el.querySelector('.gd-pane[data-v="analysis"]');
-  let r = force ? null : (await getJSON(`/api/postgame/${encodeURIComponent(id)}`)).report;
+  let r = force ? null : (await getJSON(`/api/postgame/${encodeURIComponent(id)}?${whoQuery()}`)).report;
   if (!r || !r.detail) {
     pane.innerHTML = `<div class="loading">Analysing this game… (downloading the timeline from Riot)</div>`;
-    const res = await getJSON(`/api/postgame/analyse?match_id=${encodeURIComponent(id)}`, { method: "POST" });
+    const res = await getJSON(`/api/postgame/analyse?match_id=${encodeURIComponent(id)}&${whoQuery()}`, { method: "POST" });
     if (!res.ok) { pane.innerHTML = `<p class="muted">${esc(res.error || "Could not analyse this game.")}</p>`; return; }
     r = res.report;
     GAMES[id].has_report = true;
@@ -809,7 +918,7 @@ function scoreboardHtml(d) {
         <tr class="${p.is_me ? "me" : ""}">
           <td class="who-cell">${icon(p.champion, "ico")}<span class="lvl">${p.level}</span>
             <span class="spells">${p.spells.map((s) => icon(s, "ico tiny")).join("")}</span>${icon(p.keystone, "ico tiny")}
-            <span class="pname">${esc(p.name.split("#")[0])}<small class="muted">${POS_PT[p.position] ?? ""}</small></span></td>
+            <span class="pname">${playerLink(p.name, platformOf(d.match_id), p.name.split("#")[0])}<small class="muted">${POS_PT[p.position] ?? ""}</small></span></td>
           <td>${scoreTag(p)}</td>
           <td>${p.kills}/${p.deaths}/${p.assists}<small> (${pct(p.kp)})</small></td>
           <td><div class="dmg"><span style="width:${Math.round((100 * p.damage) / d.max_damage)}%"></span></div>${fmtK(p.damage)}</td>
@@ -1073,9 +1182,9 @@ function mainsTable(rep, compact) {
   return `<div class="table-wrap"><table class="mains-table">
     <thead><tr><th>#</th><th>Player</th><th>Region</th><th>Rank</th><th>Mastery</th>${compact ? "" : "<th>Role</th>"}<th>Games*</th><th>WR</th><th>KDA</th><th>Rune</th><th>Items</th></tr></thead>
     <tbody>${rep.mains.map((m, i) => `
-      <tr>
+      <tr data-main="${esc(m.puuid)}">
         <td>${i + 1}</td>
-        <td><strong>${esc(m.name || "…")}</strong></td>
+        <td><button class="main-name" data-main="${esc(m.puuid)}" ${m.games ? "" : "disabled"} title="${m.games ? "See this player's runes and build" : "No games downloaded yet"}">${esc(m.name || "…")}</button>${hasTag(m.name) ? `<a class="plink plink-go" href="${playerHref(m.name, m.platform)}" title="See ${esc(m.name)}'s profile">↗</a>` : ""}</td>
         <td><span class="tag">${m.region}</span></td>
         <td>${m.tier === "CHALLENGER" ? "Challenger" : "Grandmaster"} <small class="muted">${m.lp} LP</small></td>
         <td>${fmtK(m.points)}</td>
@@ -1090,11 +1199,44 @@ function mainsTable(rep, compact) {
   <p class="muted small-note">* recent games of these players on this champion that the app has downloaded.</p>`;
 }
 
+// o mesmo painel da página Mains, no champ select: a vista escolhida fica enquanto o boneco for o mesmo
+const csMainsState = { champion: null, view: "all" };
 function renderCsMains(rep) {
-  $("#cs-mains").innerHTML = `
-    <p class="muted">Top 5 <strong>${esc(rep.champion.name)}</strong> mains (most mastery points, Challenger/GM EUW + KR)</p>
+  if (csMainsState.champion !== rep.champion.id) Object.assign(csMainsState, { champion: rep.champion.id, view: "all" });
+  const el = $("#cs-mains");
+  el.innerHTML = `
+    <div class="cs-mains-head">
+      <p class="muted">Top 5 <strong>${esc(rep.champion.name)}</strong> mains (most mastery points, Challenger/GM EUW + KR)</p>
+      ${rep.sample ? `<button class="secondary mains-compare" title="Compare all five side by side">Compare</button>` : ""}
+    </div>
     ${mainsTable(rep, true)}
-    ${rep.sample ? `<details><summary>Mains' runes and build · ${POS_PT[rep.position] || ""} (${rep.sample} games)</summary>${buildDetailHtml(rep)}</details>` : ""}`;
+    ${rep.sample ? `<div class="main-build-head"></div><div class="main-build"></div>`
+      : rep.mains.length ? `<p class="muted">No games of these mains downloaded yet: open this champion in the Mains tab to get them.</p>` : ""}`;
+  if (rep.sample) wireMainsBuild(el, rep, csMainsState);
+}
+
+// tabela dos mains + build por baixo: clicar num nome mostra a build dele, Compare mostra os 5 lado a lado
+// state.view é "all" (build de todos), "compare" ou o PUUID do main selecionado
+function wireMainsBuild(root, rep, state) {
+  const show = (wanted) => {
+    const main = rep.mains.find((m) => m.puuid === wanted && m.games);
+    const key = main || wanted === "compare" ? wanted : "all";
+    state.view = key;
+    root.querySelectorAll("tr[data-main]").forEach((tr) => tr.classList.toggle("selected", tr.dataset.main === key));
+    root.querySelector(".mains-compare").classList.toggle("active", key === "compare");
+    const head = root.querySelector(".main-build-head");
+    head.innerHTML = main
+      ? `<strong>${esc((main.name || "?").split("#")[0])}'s build</strong> <span class="muted">${main.games} games</span>
+         <button class="icon-btn main-build-close" title="Back to everyone's build">✕ All mains</button>`
+      : key === "compare" ? `<strong>Comparing all mains</strong>`
+      : `<strong>All mains</strong> <span class="muted">${POS_PT[rep.position] || ""} · ${rep.sample} games</span>`;
+    head.querySelector(".main-build-close")?.addEventListener("click", () => show("all"));
+    root.querySelector(".main-build").innerHTML = main ? buildDetailHtml(main.build) : key === "compare" ? compareMains(rep) : buildDetailHtml(rep);
+  };
+  root.querySelectorAll(".main-name").forEach((b) => b.addEventListener("click", () =>
+    show(state.view === b.dataset.main ? "all" : b.dataset.main))); // outro clique no mesmo nome fecha
+  root.querySelector(".mains-compare").addEventListener("click", () => show(state.view === "compare" ? "all" : "compare"));
+  show(state.view);
 }
 
 async function loadMainsList() {
@@ -1163,29 +1305,17 @@ async function openMains(id, quiet = false) {
         <div class="job-view" data-jobview="mains_games"></div>
         <small>${JOBS.mains_games?.running ? "" : `Recent games ${last ? `updated ${ago(last)}` : "not downloaded yet"}`}</small>
         <button id="mains-refresh" data-job="mains_games" class="secondary" title="Download these players' latest games">↻ Refresh games</button>
+        ${rep.sample ? `<button class="secondary mains-compare" title="Compare all five side by side">Compare</button>` : ""}
       </div>
     </div>
     ${rep.names_pending ? `<p class="muted small-note">Looking up player names…</p>` : ""}
     ${mainsTable(rep, false)}
     ${rep.sample ? `
-      <div class="subtabs main-pick">
-        <button data-main="all" class="active">All · ${POS_PT[rep.position] || ""} (${rep.sample} games)</button>
-        ${rep.mains.map((m, i) => `<button data-main="${i}" ${m.games ? "" : "disabled"}>${i + 1}. ${esc((m.name || "?").split("#")[0])} (${m.games})</button>`).join("")}
-        <button data-main="compare">Compare</button>
-      </div>
-      <div id="main-build"></div>`
+      <div class="main-build-head"></div>
+      <div class="main-build"></div>`
       : `<p class="muted">${rep.auto_refresh ? "Downloading these players' recent games… this page updates itself when done." : "No games of these mains downloaded yet."}</p>`}`;
   renderJobs();
-  if (rep.sample) {
-    const show = (key) => {
-      mainsState.view = key;
-      $$(".main-pick button").forEach((b) => b.classList.toggle("active", b.dataset.main === key));
-      $("#main-build").innerHTML = key === "all" ? buildDetailHtml(rep)
-        : key === "compare" ? compareMains(rep) : buildDetailHtml(rep.mains[+key].build);
-    };
-    $$(".main-pick button").forEach((b) => b.addEventListener("click", () => show(b.dataset.main)));
-    show(rep.mains[+mainsState.view]?.games || ["all", "compare"].includes(mainsState.view) ? mainsState.view : "all");
-  }
+  if (rep.sample) wireMainsBuild($("#mains-panel"), rep, mainsState);
   $("#mains-sort").addEventListener("change", (e) => { mainsState.sort = e.target.value; openMains(id); });
   $("#mains-refresh").addEventListener("click", async () => {
     const res = await getJSON(`/api/mains/${id}/refresh`, { method: "POST" });
@@ -1277,7 +1407,7 @@ function compareMains(rep) {
     }).join("")}<br><small class="muted">${pct(b.runes.winrate)} WR · ${b.runes.games}g</small>` : "–";
   const row = (label, fn) => `<tr><th>${label}</th>${ms.map((m) => `<td>${fn(m.build, m)}</td>`).join("")}</tr>`;
   return `<div class="table-wrap"><table class="compare">
-    <thead><tr><th></th>${ms.map((m) => `<th>${esc((m.name || "?").split("#")[0])}<br><small class="muted">${m.region} · ${m.games} games · ${pct(m.winrate)}</small></th>`).join("")}</tr></thead>
+    <thead><tr><th></th>${ms.map((m) => `<th>${playerLink(m.name, m.platform, (m.name || "?").split("#")[0])}<br><small class="muted">${m.region} · ${m.games} games · ${pct(m.winrate)}</small></th>`).join("")}</tr></thead>
     <tbody>
       ${row("Runes", runes)}
       ${row("Spells", (b) => b.spells ? spellIcons(b.spells) : "–")}
@@ -1535,3 +1665,4 @@ async function loadExDetail(cid) {
 
 // arranque
 renderSides(null);
+route();

@@ -6,7 +6,7 @@
   <title>Noob Helper</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap">
-  <link rel="stylesheet" href="/static/style.css?v=25">
+  <link rel="stylesheet" href="/static/style.css?v=27">
 </head>
 <body data-tab="cs">
 <header class="topbar">
@@ -112,6 +112,7 @@
       <div class="sync-box">
         <div class="job-view" data-jobview="sync"></div>
         <button id="sync" data-job="sync" class="secondary">↻ Check for new games</button>
+        <button id="player-refresh" class="secondary">↻ Refresh</button>
       </div>
     </div>
 
@@ -132,7 +133,7 @@
     <div id="prof-champs" hidden>
       <article class="card">
         <div class="row between">
-          <h2>Your ranked stats per champion</h2>
+          <h2 id="stats-title">Your ranked stats per champion</h2>
           <select id="stats-pos">
             <option value="">All roles</option>
             <option value="TOP">Top</option><option value="JUNGLE">Jungle</option><option value="MIDDLE">Mid</option>
@@ -145,6 +146,7 @@
             <tbody></tbody>
           </table>
         </div>
+        <p id="stats-note" class="muted small-note"></p>
       </article>
     </div>
   </section>
@@ -251,6 +253,6 @@
   <datalist id="champ-list"></datalist>
 </div>
 
-<script src="/static/app.js?v=27"></script>
+<script src="/static/app.js?v=29"></script>
 </body>
 </html>

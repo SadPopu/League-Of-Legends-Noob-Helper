@@ -4,6 +4,7 @@ A API da Riot diz os jogadores, bonecos, feitiços e runas de um jogo a decorrer
 A role vem, por esta ordem, do próprio jogo (Live Client Data, quando o jogo já abriu), do champ select
 (só para a tua equipa) ou é calculada com os feitiços, as runas e os últimos jogos de cada jogador.
 """
+import asyncio
 import logging
 from collections import Counter
 from itertools import permutations
@@ -104,16 +105,21 @@ def assign_roles(db: DB, dd: DDragon, players: list[dict], known: dict[tuple[int
             p["role"], p["role_source"] = pos, f[1] if f and f[0] == pos else "likely"
 
 
-async def live_positions(dd: DDragon) -> dict[tuple[int, int], tuple[str, str]]:
-    """Roles dadas pelo próprio jogo. Só conta uma equipa com as 5 roles preenchidas e diferentes."""
+async def live_data(dd: DDragon) -> tuple[dict[tuple[int, int], tuple[str, str]], dict[tuple[int, int], int]]:
+    """O que o próprio jogo diz: (roles, skins). Para as roles só conta uma equipa com as 5 preenchidas e diferentes."""
     try:
         async with httpx.AsyncClient(verify=False, timeout=3) as c:  # certificado da Riot, só em localhost
             r = await c.get(LIVE_URL)
         rows = r.json() if r.status_code == 200 else []
     except (httpx.HTTPError, ValueError):
-        return {}
+        return {}, {}
     if not isinstance(rows, list):
-        return {}
+        return {}, {}
+    skins = {}
+    for p in rows:
+        cid = dd.champ_lookup(p.get("championName", ""))
+        if cid and p.get("team") in LIVE_TEAMS:
+            skins[(LIVE_TEAMS[p["team"]], cid)] = p.get("skinID") or 0
     known = {}
     for side_name, team in LIVE_TEAMS.items():
         side = [p for p in rows if p.get("team") == side_name]
@@ -123,7 +129,17 @@ async def live_positions(dd: DDragon) -> dict[tuple[int, int], tuple[str, str]]:
             cid = dd.champ_lookup(p.get("championName", ""))
             if cid:
                 known[(team, cid)] = (p["position"], "game")
-    return known
+    return known, skins
+
+
+async def apply_skins(dd: DDragon, players: list[dict], skins: dict[tuple[int, int], int]):
+    async def one(p: dict):
+        skin = skins.get((p["team"], p["champion_id"]))
+        art = await dd.skin_art(p["champion_id"], skin) if skin else None
+        if art:
+            p["champion"]["art"] = art
+
+    await asyncio.gather(*(one(p) for p in players))
 
 
 # ---------------------------------------------------------------- dados de cada jogador

@@ -11,10 +11,11 @@ A personal League of Legends coach that runs on your PC and opens in your browse
   - summoner spells, skills (first 3 levels and max order), starting items and the order of the first 3 items with the average minute;
   - situational tips (anti-heal, MR/armor, penetration…).
 - **Jungle pathing:** the numbered full clear on the minimap for the most common starting camp (blue or red side), the real routes junglers took in the first 7 minutes, and where the first gank happens.
-- **Mains:** for each champion, the 5 Challenger/GM players from EUW and KR with the most mastery points (or LP). Shows region, rank, win rate, KDA, rune, items and their combined build. You can pick each main to see their build, or "Compare" all 5 side by side. Opening a champion updates the mains' recent games in the background (at most twice a day per champion).
+- **Mains:** for each champion, the 5 Challenger/GM players from EUW and KR with the most mastery points (or LP). Shows region, rank, win rate, KDA, rune, items and their combined build. Click a main's name to see their build, or "Compare" all 5 side by side. Opening a champion updates the mains' recent games in the background (at most twice a day per champion).
 - **Match History:** all your games since the start of the season, split by queue (Ranked Solo/Duo, Flex, Normals, ARAM, Other).
   - Each queue has a summary: win rate, KDA, CS/min, damage, gold, KP, average score and most played champions.
   - Each game shows KDA, score (0–10, with MVP/ACE), CS, damage, gold, vision, spells, runes and items. Click a game to see all 10 players.
+- **Player pages:** click any player's name (match history, scoreboards, mains, the live game, search) to see their rank, games and champions. Games load from Riot 20 at a time and are kept for 30 days, apart from your own data. The LP chart only exists for your account, because Riot doesn't share LP history.
 - **Post-game:** analyses each game automatically when it ends.
   - Feedback on farming, laning, deaths, vision, control wards, fights, items and comparisons with your averages and high elo. Checkboxes pick which categories count towards the score.
   - Rift minimap with all 10 players minute by minute (slider and ▶), kills/deaths and objectives where they happened, your path and the enemy jungler's path.
@@ -55,6 +56,9 @@ To test without queueing, use the **simulator** at the bottom of the Champ Selec
 | `coach/analysis.py` | Pick, counter and build rules |
 | `coach/mains.py` | Top mains per champion (mastery) and their builds |
 | `coach/history.py` | Season match history and the per-player score |
+| `coach/ingame.py` | The game that is starting: players, roles, skins and recent performance |
+| `coach/player.py` | Games and champion stats of other players, loaded on demand |
+| `coach/autostart.py` | The "Start with Windows" option |
 | `coach/postgame.py` | Post-game analysis (metrics + timeline + feedback) |
 | `coach/main.py` | FastAPI server, websocket for the UI and daily tasks |
 | `static/` | Web UI |
