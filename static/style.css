@@ -471,7 +471,18 @@ button.secondary.active { background: rgba(200, 170, 110, .22); color: var(--gol
 body.viewing #player-refresh { display: inline-block; }
 /* modo online: a favorita do visitante não tem "voltar"; ações que gastam a chave do dono ficam escondidas */
 body.viewing-fav .back-link { display: none !important; }
-body.hosted [data-job], body.hosted [data-jobview], body.hosted .switch, body.hosted #auto-last, body.hosted #collect-stop { display: none !important; }
+/* Data e tarefas que gastam a chave da Riot: só para os admins do portfolio */
+body.hosted:not(.is-admin) nav [data-tab="data"] { display: none; }
+body.hosted:not(.is-admin) [data-job], body.hosted:not(.is-admin) [data-jobview], body.hosted:not(.is-admin) .switch,
+body.hosted:not(.is-admin) #auto-last, body.hosted:not(.is-admin) #collect-stop { display: none !important; }
+/* Visitantes (só admin, modo online) */
+.visitors-card { margin-bottom: 16px; }
+.visitors-stats { display: flex; gap: 22px; flex-wrap: wrap; margin: 10px 0 14px; }
+.visitors-stats strong { display: block; font-size: 22px; }
+.visitors-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.visitors-table th, .visitors-table td { text-align: left; padding: 6px 8px; border-top: 1px solid rgba(255,255,255,.06); vertical-align: top; }
+.visitors-table th { font-weight: 500; opacity: .6; }
+.visitors-table .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #3ecf8e; margin-right: 6px; }
 .hosted-pick { padding: 18px 4px; }
 body.hosted:not(.viewing) .lp-card { display: none; }
 .hosted-pick p { margin-top: 6px; max-width: 520px; line-height: 1.5; }

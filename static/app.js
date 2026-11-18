@@ -5,11 +5,20 @@ const pct = (x) => (x == null ? "–" : `${Math.round(x * 100)}%`);
 const num = (x, d = 1) => (x == null ? "–" : Number(x).toFixed(d));
 const icon = (c, cls = "ico") => (c && c.icon ? `<img class="${cls}" src="${c.icon}" alt="${esc(c.name)}" title="${esc(c.name)}">` : `<span class="${cls} blank"></span>`);
 const POS_PT = { TOP: "Top", JUNGLE: "Jungle", MIDDLE: "Mid", BOTTOM: "ADC", UTILITY: "Support", "": "—" };
-const getJSON = (url, opts) => fetch(url, opts).then((r) => r.json());
+const VISITOR = (() => {
+  try {
+    let id = localStorage.getItem("noobhelper.visitor");
+    if (!id) { id = (crypto.randomUUID?.() || String(Math.random()).slice(2)); localStorage.setItem("noobhelper.visitor", id); }
+    return id;
+  } catch { return "no-storage"; }
+})();
+const getJSON = (url, opts = {}) =>
+  fetch(url, { ...opts, headers: { ...(opts.headers || {}), "X-Visitor": VISITOR } }).then((r) => r.json());
 
 // ---------------------------------------------------------------- modo online (ex.: popu.pt/lol)
 // Cada visitante escolhe a sua conta favorita, guardada só no browser dele.
 let HOSTED = false;
+let ADMIN = true; // fora do modo online a app é só do dono
 const FAV_KEY = "noobhelper.favorite";
 function hostedFav() {
   if (!HOSTED) return null;
@@ -46,7 +55,7 @@ function showTab(tab) {
   $$(".tab").forEach((t) => t.classList.toggle("active", t.id === `tab-${tab}`));
   if (tab === "profile") { loadProfile(); loadHistory(true); }
   if (tab === "mains") loadMainsList();
-  if (tab === "data") loadData();
+  if (tab === "data") { if (!ADMIN) return showTab("cs"); loadData(); if (HOSTED) loadVisitors(); }
   if (tab !== "cs") $("#sim-panel").hidden = true;
 }
 $$("nav button").forEach((b) => b.addEventListener("click", () => {
@@ -197,6 +206,8 @@ $("#acc-search").addEventListener("submit", async (ev) => {
   $("#acc-favorite").addEventListener("click", async (e) => {
     if (HOSTED) {
       saveHostedFav(res.name, MY_PLATFORM);
+      getJSON("api/visit", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "favorite", detail: res.name }) }).catch(() => {});
       accBox.hidden = true;
       $("#acc-input").value = "";
       $("#st-me").textContent = `★ ${res.name}`;
@@ -631,7 +642,8 @@ async function loadProfile() {
   if (!who && HOSTED) {
     $("#profile-card").innerHTML = `<div class="hosted-pick"><strong>Pick your account</strong>
       <p class="muted">Search your Riot ID (Name#TAG) in the box at the top and press "Set as favorite".
-      It's saved only in this browser, so everyone can try it with their own account.</p></div>`;
+      It's saved only in this browser, so everyone can try it with their own account.</p>
+      <p class="muted small-note">Visits are counted anonymously to see how the demo is used (no IP addresses).</p></div>`;
     return;
   }
   const p = who ? await who.ready : await getJSON("api/profile").catch(() => ({ ok: false, error: "Could not reach the app." }));
@@ -1535,6 +1547,50 @@ const QUEUE_LABEL = { solo: "Solo/Duo", flex: "Flex", normal: "Normals", aram: "
 let OVERVIEW = null;
 const collect = { target: 1000, regions: ["euw1", "kr"], timelines: true, days: 30 };
 
+// ---------------------------------------------------------------- visitantes (admin, modo online)
+const visitAgo = (ts) => {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+};
+const ACTION_TXT = { open: "opened the app", search: "searched", favorite: "set favorite" };
+
+async function loadVisitors() {
+  const box = $("#visitors");
+  box.hidden = false;
+  box.innerHTML = `<div class="loading">Loading visitors…</div>`;
+  const v = await getJSON("api/admin/visitors").catch(() => ({ ok: false }));
+  if (!v.ok) { box.innerHTML = `<p class="muted">Could not load the visitors.</p>`; return; }
+  const who = (r) => r.user ? esc(r.user) : `<span class="muted">guest ${esc(r.visitor.slice(0, 6))}</span>`;
+  box.innerHTML = `
+    <div class="src-head"><span class="src-icon">👥</span><h3>Visitors</h3>
+      <button type="button" class="secondary" id="visitors-refresh" style="margin-left:auto">↻ Refresh</button></div>
+    <div class="visitors-stats">
+      <div><strong>${v.online_now}</strong><small class="muted">open now</small></div>
+      <div><strong>${v.today}</strong><small class="muted">last 24 h</small></div>
+      <div><strong>${v.week}</strong><small class="muted">last 7 days</small></div>
+      <div><strong>${v.total}</strong><small class="muted">all time (90 days kept)</small></div>
+    </div>
+    <table class="visitors-table">
+      <thead><tr><th>Who</th><th>Favorite</th><th>Searches</th><th>Where</th><th>Last seen</th><th>First seen</th></tr></thead>
+      <tbody>${v.visitors.map((r) => `<tr>
+        <td>${Date.now() / 1000 - r.last_seen < 300 ? `<span class="dot" title="active in the last 5 min"></span>` : ""}${who(r)}</td>
+        <td>${r.favorite ? esc(r.favorite) : `<span class="muted">–</span>`}</td>
+        <td>${r.searches || 0}</td>
+        <td>${esc([r.country, r.device].filter(Boolean).join(" · ")) || "–"}</td>
+        <td>${visitAgo(r.last_seen)}</td>
+        <td>${visitAgo(r.first_seen)}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">Nobody yet.</td></tr>`}</tbody>
+    </table>
+    <details style="margin-top:12px"><summary class="muted">Latest activity</summary>
+      <table class="visitors-table">${v.recent.map((e) => `<tr><td>${visitAgo(e.ts)}</td><td>${who(e)}</td>
+        <td>${ACTION_TXT[e.action] || esc(e.action)}${e.detail ? ` <strong>${esc(e.detail)}</strong>` : ""}</td>
+        <td class="muted">${esc([e.country, e.device].filter(Boolean).join(" · "))}</td></tr>`).join("")}</table>
+    </details>`;
+  $("#visitors-refresh").addEventListener("click", loadVisitors);
+}
+
 async function loadData() {
   const o = await getJSON("api/data/overview");
   OVERVIEW = o;
@@ -1711,8 +1767,12 @@ getJSON("api/config")
   .catch(() => ({}))
   .then((c) => {
     HOSTED = !!c.hosted;
+    ADMIN = !HOSTED || !!c.admin;
     if (c.platform) MY_PLATFORM = c.platform;
     document.body.classList.toggle("hosted", HOSTED);
+    document.body.classList.toggle("is-admin", ADMIN);
+    // Data só para admins: quem não é volta ao Champ Select se lá estiver
+    if (!ADMIN && document.body.dataset.tab === "data") showTab("cs");
     const fav = hostedFav();
     if (HOSTED) {
       lastMe = fav?.riotId || "";

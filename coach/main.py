@@ -8,12 +8,12 @@ import time
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config
+from . import config, visits
 from .analysis import my_champion_stats, recommend_build, recommend_counters, recommend_picks
 from .champselect import ChampSelectState, mock_session, parse_session
 from .data import collect_new_games, crawl_meta
@@ -569,6 +569,7 @@ async def daily_loop():
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await coach.dd.load()
+    visits.init()
     # No modo online não há cliente do LoL nem tarefas que gastem a chave da Riot do dono
     lcu_task = asyncio.create_task(coach.lcu.run() if not config.HOSTED else asyncio.sleep(0))
     # NOOB_NO_AUTO=1 desliga as tarefas diárias (útil para testes)
@@ -599,27 +600,71 @@ async def never_cache_page(request, call_next):
 
 # Modo online: rotas da conta do dono e tarefas que gastam a chave da Riot ficam desligadas.
 # (cada visitante usa as páginas de jogador com a sua conta favorita, guardada no browser)
+# Rotas da conta do dono: no modo online ninguém as usa (cada visitante tem a sua favorita).
 HOSTED_BLOCKED = {
     ("GET", "/api/profile"), ("GET", "/api/stats"), ("GET", "/api/history"), ("GET", "/api/lp"),
     ("GET", "/api/my-mastery"), ("POST", "/api/sync"), ("POST", "/api/account/favorite"),
-    ("POST", "/api/meta/collect"), ("POST", "/api/meta/crawl"), ("POST", "/api/mains/crawl"),
-    ("POST", "/api/auto"),
 }
+# Separador Data e tarefas que gastam a chave da Riot: só para os admins do portfolio.
+ADMIN_ONLY = {
+    ("POST", "/api/meta/collect"), ("POST", "/api/meta/crawl"), ("POST", "/api/mains/crawl"),
+    ("GET", "/api/auto"), ("POST", "/api/auto"), ("GET", "/api/admin/visitors"),
+}
+ADMIN_ONLY_PREFIXES = (("GET", "/api/data/"), ("POST", "/api/jobs/"))
+
+
+def is_admin(request) -> bool:
+    """Fora do modo online a app é só do dono. No modo online, o portfolio diz quem é admin
+    (cabeçalho X-Auth-Admin, que o proxy define sempre e o browser não consegue forjar)."""
+    return not config.HOSTED or request.headers.get("x-auth-admin") == "1"
+
+
+def log_visit(request, action: str, detail: str | None = None) -> None:
+    try:
+        visits.log(request.headers.get("x-visitor", ""), action, detail, request.headers.get("x-auth-user"),
+                   request.headers.get("cf-ipcountry"), request.headers.get("user-agent", ""))
+    except Exception as e:  # o registo nunca pode partir a app
+        log.warning("visit log failed: %s", e)
 
 
 @app.middleware("http")
 async def hosted_guard(request, call_next):
     if config.HOSTED:
         path = request.url.path.rstrip("/") or "/"
-        if (request.method, path) in HOSTED_BLOCKED or (request.method == "POST" and path.startswith("/api/jobs/")):
+        key = (request.method, path)
+        admin_only = key in ADMIN_ONLY or any(request.method == m and path.startswith(p) for m, p in ADMIN_ONLY_PREFIXES)
+        if key in HOSTED_BLOCKED or (admin_only and not is_admin(request)):
             return JSONResponse({"ok": False, "hosted": True,
                                  "error": "Not available in the online demo. Search your Riot ID and set it as favorite."})
+        # quem usa a app (só no modo online)
+        if key == ("GET", "/api/config"):
+            log_visit(request, "open")
+        elif key == ("GET", "/api/account/search"):
+            log_visit(request, "search", request.query_params.get("riot_id"))
     return await call_next(request)
 
 
 @app.get("/api/config")
-async def app_config():
-    return {"hosted": config.HOSTED, "platform": config.PLATFORM}
+async def app_config(request: Request):
+    return {"hosted": config.HOSTED, "platform": config.PLATFORM, "admin": is_admin(request)}
+
+
+class VisitParams(BaseModel):
+    action: str
+    detail: str | None = None
+
+
+@app.post("/api/visit")
+async def visit(params: VisitParams, request: Request):
+    """O browser avisa quando o visitante escolhe a conta favorita (fica guardada só no browser dele)."""
+    if config.HOSTED and params.action in ("favorite",):
+        log_visit(request, params.action, params.detail)
+    return {"ok": True}
+
+
+@app.get("/api/admin/visitors")
+async def admin_visitors():
+    return visits.report(online_now=len(coach.clients))
 
 
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
