@@ -18,6 +18,10 @@ REGION = os.getenv("REGION", "europe")
 LOL_PATH = os.getenv("LOL_PATH", r"C:\Riot Games\League of Legends")
 PORT = int(os.getenv("PORT", "8765"))
 
+# Modo online (ex.: no portfolio em popu.pt): cada visitante escolhe a sua conta favorita no browser,
+# não há ligação ao cliente do LoL e ficam desligadas as tarefas que gastam a chave da Riot do dono.
+HOSTED = os.getenv("HOSTED", "").strip().lower() in ("1", "true", "yes")
+
 DB_PATH = DATA_DIR / "coach.db"
 
 # Ranked Solo/Duo e Flex

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -80,7 +80,8 @@ class Coach:
             self.clients.discard(ws)
 
     def status(self) -> dict:
-        return {"type": "status", "lcu": self.lcu.connected, "me": self.me, "phase": self.phase,
+        return {"type": "status", "lcu": self.lcu.connected, "me": {} if config.HOSTED else self.me, "phase": self.phase,
+                "hosted": config.HOSTED,
                 "riot_key": bool(config.RIOT_API_KEY), "jobs": self.jobs, "version": self.dd.version,
                 "build": APP_BUILD, "platform": config.PLATFORM}
 
@@ -568,12 +569,15 @@ async def daily_loop():
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await coach.dd.load()
-    lcu_task = asyncio.create_task(coach.lcu.run())
+    # No modo online não há cliente do LoL nem tarefas que gastem a chave da Riot do dono
+    lcu_task = asyncio.create_task(coach.lcu.run() if not config.HOSTED else asyncio.sleep(0))
     # NOOB_NO_AUTO=1 desliga as tarefas diárias (útil para testes)
-    daily_task = asyncio.create_task(daily_loop() if not os.getenv("NOOB_NO_AUTO") else asyncio.sleep(0))
-    await coach.resolve_me()
-    asyncio.create_task(my_mastery())  # guarda as tuas maestrias para as sugestões do champ select
-    asyncio.create_task(profile())     # regista o rank atual (gráfico de LP)
+    no_auto = os.getenv("NOOB_NO_AUTO") or config.HOSTED
+    daily_task = asyncio.create_task(daily_loop() if not no_auto else asyncio.sleep(0))
+    if not config.HOSTED:
+        await coach.resolve_me()
+        asyncio.create_task(my_mastery())  # guarda as tuas maestrias para as sugestões do champ select
+        asyncio.create_task(profile())     # regista o rank atual (gráfico de LP)
     log.info("Open http://127.0.0.1:%s in your browser", config.PORT)
     yield
     lcu_task.cancel()
@@ -592,6 +596,31 @@ async def never_cache_page(request, call_next):
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store"
     return response
+
+# Modo online: rotas da conta do dono e tarefas que gastam a chave da Riot ficam desligadas.
+# (cada visitante usa as páginas de jogador com a sua conta favorita, guardada no browser)
+HOSTED_BLOCKED = {
+    ("GET", "/api/profile"), ("GET", "/api/stats"), ("GET", "/api/history"), ("GET", "/api/lp"),
+    ("GET", "/api/my-mastery"), ("POST", "/api/sync"), ("POST", "/api/account/favorite"),
+    ("POST", "/api/meta/collect"), ("POST", "/api/meta/crawl"), ("POST", "/api/mains/crawl"),
+    ("POST", "/api/auto"),
+}
+
+
+@app.middleware("http")
+async def hosted_guard(request, call_next):
+    if config.HOSTED:
+        path = request.url.path.rstrip("/") or "/"
+        if (request.method, path) in HOSTED_BLOCKED or (request.method == "POST" and path.startswith("/api/jobs/")):
+            return JSONResponse({"ok": False, "hosted": True,
+                                 "error": "Not available in the online demo. Search your Riot ID and set it as favorite."})
+    return await call_next(request)
+
+
+@app.get("/api/config")
+async def app_config():
+    return {"hosted": config.HOSTED, "platform": config.PLATFORM}
+
 
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 

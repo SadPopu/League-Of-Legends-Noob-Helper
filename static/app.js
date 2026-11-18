@@ -6,6 +6,18 @@ const num = (x, d = 1) => (x == null ? "–" : Number(x).toFixed(d));
 const icon = (c, cls = "ico") => (c && c.icon ? `<img class="${cls}" src="${c.icon}" alt="${esc(c.name)}" title="${esc(c.name)}">` : `<span class="${cls} blank"></span>`);
 const POS_PT = { TOP: "Top", JUNGLE: "Jungle", MIDDLE: "Mid", BOTTOM: "ADC", UTILITY: "Support", "": "—" };
 const getJSON = (url, opts) => fetch(url, opts).then((r) => r.json());
+
+// ---------------------------------------------------------------- modo online (ex.: popu.pt/lol)
+// Cada visitante escolhe a sua conta favorita, guardada só no browser dele.
+let HOSTED = false;
+const FAV_KEY = "noobhelper.favorite";
+function hostedFav() {
+  if (!HOSTED) return null;
+  try { return JSON.parse(localStorage.getItem(FAV_KEY) || "null"); } catch { return null; }
+}
+function saveHostedFav(riotId, platform) {
+  try { localStorage.setItem(FAV_KEY, JSON.stringify({ riotId, platform })); } catch { /* sem localStorage */ }
+}
 const fmtK = (x) => (x == null ? "–" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : `${Math.round(x)}`);
 const fmtN = (x) => (x == null ? "–" : Number(x).toLocaleString("en-GB"));
 const mins = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -137,8 +149,9 @@ function renderStatus(s) {
     lastJobRunning[name] = !!j?.running;
   }
   // mudou a conta favorita: o que está aberto era da conta anterior
-  const me = s.me?.name || "";
-  $("#st-me").textContent = me ? `★ ${me}` : "";
+  const me = HOSTED ? (hostedFav()?.riotId || "") : (s.me?.name || "");
+  $("#st-me").textContent = me ? `★ ${me}` : HOSTED ? "Pick your account ↑" : "";
+  if (HOSTED) { lcu.querySelector("span").textContent = "Online demo"; lcu.className = "pill off"; }
   if (lastMe !== null && me !== lastMe) refreshOpenTab();
   lastMe = me;
 }
@@ -171,6 +184,7 @@ $("#acc-search").addEventListener("submit", async (ev) => {
   }
   if (seq !== accSeq) return; // entretanto fez-se outra pesquisa
   if (!res.ok) { accBox.innerHTML = `<small class="bad">${esc(res.error)}</small>`; return; }
+  if (HOSTED) res.is_favorite = (hostedFav()?.riotId || "").toLowerCase() === res.name.toLowerCase();
   accBox.innerHTML = `
     <div class="acc-found">
       ${res.icon ? `<img src="${res.icon}" alt="">` : ""}
@@ -181,6 +195,17 @@ $("#acc-search").addEventListener("submit", async (ev) => {
     <small id="acc-error" class="bad"></small>`;
   if (res.is_favorite) return;
   $("#acc-favorite").addEventListener("click", async (e) => {
+    if (HOSTED) {
+      saveHostedFav(res.name, MY_PLATFORM);
+      accBox.hidden = true;
+      $("#acc-input").value = "";
+      $("#st-me").textContent = `★ ${res.name}`;
+      lastMe = res.name;
+      if (location.hash) location.hash = "";
+      setViewing(res.name, MY_PLATFORM);
+      showTab("profile");
+      return;
+    }
     e.target.disabled = true;
     e.target.textContent = "Switching…";
     let done;
@@ -559,6 +584,8 @@ function setViewing(riotId, platform) {
       .catch(() => ({ ok: false, error: "Could not reach the app." })),
   } : null;
   document.body.classList.toggle("viewing", !!viewing);
+  const fav = hostedFav();
+  document.body.classList.toggle("viewing-fav", !!(viewing && fav && fav.riotId.toLowerCase() === riotId.toLowerCase()));
   // cada jogador começa no histórico completo
   hist.group = "all";
   $$("#hist-groups button").forEach((b) => b.classList.toggle("active", b.dataset.group === "all"));
@@ -566,7 +593,9 @@ function setViewing(riotId, platform) {
 }
 
 function leavePlayer() {
-  if (viewing) setViewing(null);
+  const fav = hostedFav();
+  if (fav) { if (viewing?.riotId !== fav.riotId) setViewing(fav.riotId, fav.platform); }
+  else if (viewing) setViewing(null);
   if (location.hash) location.hash = "";
 }
 
@@ -581,7 +610,9 @@ function route() {
     return;
   }
   const wasViewing = !!viewing;
-  if (wasViewing) setViewing(null);
+  const fav = hostedFav();
+  if (fav) { if (viewing?.riotId !== fav.riotId) setViewing(fav.riotId, fav.platform); }
+  else if (wasViewing) setViewing(null);
   if (riotId || (wasViewing && isActive("profile"))) showTab("profile");
 }
 window.addEventListener("hashchange", route);
@@ -597,6 +628,12 @@ const whoQuery = () => (viewing?.puuid ? `puuid=${encodeURIComponent(viewing.puu
 async function loadProfile() {
   const who = viewing;
   if (who) $("#profile-card").innerHTML = `<div class="loading">Loading ${esc(who.riotId)}…</div>`;
+  if (!who && HOSTED) {
+    $("#profile-card").innerHTML = `<div class="hosted-pick"><strong>Pick your account</strong>
+      <p class="muted">Search your Riot ID (Name#TAG) in the box at the top and press "Set as favorite".
+      It's saved only in this browser, so everyone can try it with their own account.</p></div>`;
+    return;
+  }
   const p = who ? await who.ready : await getJSON("api/profile").catch(() => ({ ok: false, error: "Could not reach the app." }));
   if (who !== viewing) return; // entretanto abriu-se outro jogador
   if (!p.ok) {
@@ -718,6 +755,7 @@ $$("#profile-sub button").forEach((b) => b.addEventListener("click", () => {
 async function loadStats() {
   const pos = $("#stats-pos").value;
   const who = viewing;
+  if (!who && HOSTED) return;
   let url = `api/stats${pos ? `?position=${pos}` : ""}`;
   if (who) {
     $("#stats-note").textContent = "";
@@ -768,6 +806,7 @@ async function loadHistory(reset) {
   if (reset) hist.offset = 0;
   const seq = ++hist.seq;
   const who = viewing;
+  if (!who && HOSTED) return;
   let url = `api/history?group=${hist.group}&offset=${hist.offset}&limit=20`;
   if (who) {
     if (reset) {
@@ -1668,4 +1707,19 @@ async function loadExDetail(cid) {
 
 // arranque
 renderSides(null);
-route();
+getJSON("api/config")
+  .catch(() => ({}))
+  .then((c) => {
+    HOSTED = !!c.hosted;
+    if (c.platform) MY_PLATFORM = c.platform;
+    document.body.classList.toggle("hosted", HOSTED);
+    const fav = hostedFav();
+    if (HOSTED) {
+      lastMe = fav?.riotId || "";
+      $("#st-me").textContent = fav ? `★ ${fav.riotId}` : "Pick your account ↑";
+      const lcu = $("#st-lcu");
+      lcu.querySelector("span").textContent = "Online demo";
+      lcu.className = "pill off";
+    }
+    route();
+  });
