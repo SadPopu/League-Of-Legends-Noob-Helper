@@ -44,7 +44,10 @@ $$("nav button").forEach((b) => b.addEventListener("click", () => {
 
 // ---------------------------------------------------------------- websocket
 function connect() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  // Relativo à página: funciona na raiz e dentro de um path (ex.: /lol/), em http e https
+  const wsUrl = new URL("ws", location.href);
+  wsUrl.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(wsUrl);
   ws.onmessage = (ev) => handle(JSON.parse(ev.data));
   ws.onclose = () => setTimeout(connect, 2000);
 }
@@ -162,7 +165,7 @@ $("#acc-search").addEventListener("submit", async (ev) => {
   accBox.innerHTML = `<small class="muted">Searching…</small>`;
   let res;
   try {
-    res = await getJSON(`/api/account/search?riot_id=${encodeURIComponent(riotId)}`);
+    res = await getJSON(`api/account/search?riot_id=${encodeURIComponent(riotId)}`);
   } catch {
     res = { ok: false, error: "Could not reach the app. Is it still running?" };
   }
@@ -182,7 +185,7 @@ $("#acc-search").addEventListener("submit", async (ev) => {
     e.target.textContent = "Switching…";
     let done;
     try {
-      done = await getJSON("/api/account/favorite", {
+      done = await getJSON("api/account/favorite", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ riot_id: res.name }),
       });
     } catch {
@@ -393,7 +396,7 @@ function renderCounters(p) {
 // ---------------------------------------------------------------- árvore de runas
 let RUNES = null;
 let lastBuild = null;
-getJSON("/api/runes").then((d) => {
+getJSON("api/runes").then((d) => {
   RUNES = d;
   if (lastBuild) renderBuild(lastBuild); // a build chegou antes das runas: desenha a árvore
 });
@@ -513,7 +516,7 @@ function renderBuild(b) {
 }
 
 // ---------------------------------------------------------------- simulador
-getJSON("/api/champions").then((names) => {
+getJSON("api/champions").then((names) => {
   $("#champ-list").innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
 });
 $("#sim-fab").addEventListener("click", () => ($("#sim-panel").hidden = !$("#sim-panel").hidden));
@@ -534,9 +537,9 @@ $("#sim-form").addEventListener("submit", async (e) => {
     bans: splitList(f.get("bans")),
     enemy_bans: splitList(f.get("enemy_bans")),
   };
-  await fetch("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  await fetch("api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 });
-$("#sim-end").addEventListener("click", () => fetch("/api/simulate/end", { method: "POST" }));
+$("#sim-end").addEventListener("click", () => fetch("api/simulate/end", { method: "POST" }));
 
 // ---------------------------------------------------------------- perfil
 const TIER_NAME = (t) => t.charAt(0) + t.slice(1).toLowerCase();
@@ -552,7 +555,7 @@ let MY_PLATFORM = "euw1";
 function setViewing(riotId, platform) {
   viewing = riotId ? {
     riotId, platform,
-    ready: getJSON(`/api/player?riot_id=${encodeURIComponent(riotId)}&platform=${platform}`)
+    ready: getJSON(`api/player?riot_id=${encodeURIComponent(riotId)}&platform=${platform}`)
       .catch(() => ({ ok: false, error: "Could not reach the app." })),
   } : null;
   document.body.classList.toggle("viewing", !!viewing);
@@ -594,7 +597,7 @@ const whoQuery = () => (viewing?.puuid ? `puuid=${encodeURIComponent(viewing.puu
 async function loadProfile() {
   const who = viewing;
   if (who) $("#profile-card").innerHTML = `<div class="loading">Loading ${esc(who.riotId)}…</div>`;
-  const p = who ? await who.ready : await getJSON("/api/profile").catch(() => ({ ok: false, error: "Could not reach the app." }));
+  const p = who ? await who.ready : await getJSON("api/profile").catch(() => ({ ok: false, error: "Could not reach the app." }));
   if (who !== viewing) return; // entretanto abriu-se outro jogador
   if (!p.ok) {
     $("#profile-card").innerHTML = `<p class="muted">${esc(p.error)}</p>`;
@@ -645,7 +648,7 @@ document.querySelectorAll("#lp-range button").forEach((b) => b.addEventListener(
 }));
 
 async function loadLp() {
-  const data = await getJSON(`/api/lp?queue=${lp.queue}`);
+  const data = await getJSON(`api/lp?queue=${lp.queue}`);
   const all = data.points || [];
   const el = $("#lp-chart");
   if (!all.length) {
@@ -715,7 +718,7 @@ $$("#profile-sub button").forEach((b) => b.addEventListener("click", () => {
 async function loadStats() {
   const pos = $("#stats-pos").value;
   const who = viewing;
-  let url = `/api/stats${pos ? `?position=${pos}` : ""}`;
+  let url = `api/stats${pos ? `?position=${pos}` : ""}`;
   if (who) {
     $("#stats-note").textContent = "";
     $("#stats tbody").innerHTML = `<tr><td colspan="8"><div class="loading">Loading ranked games from Riot…</div></td></tr>`;
@@ -723,7 +726,7 @@ async function loadStats() {
     if (who !== viewing) return;
     if (!p.ok) { $("#stats tbody").innerHTML = `<tr><td colspan="8" class="muted">${esc(p.error)}</td></tr>`; return; }
     who.puuid = p.puuid;
-    url = `/api/player/stats?${whoQuery()}&platform=${who.platform}${pos ? `&position=${pos}` : ""}`;
+    url = `api/player/stats?${whoQuery()}&platform=${who.platform}${pos ? `&position=${pos}` : ""}`;
   }
   const data = await getJSON(url);
   if (who !== viewing) return;
@@ -741,7 +744,7 @@ async function loadStats() {
 $("#stats-pos").addEventListener("change", loadStats);
 
 $("#sync").addEventListener("click", async () => {
-  const res = await getJSON("/api/sync", { method: "POST" });
+  const res = await getJSON("api/sync", { method: "POST" });
   if (!res.ok && res.error) $('[data-jobview="sync"]').innerHTML = `<small class="bad">${esc(res.error)}</small>`;
 });
 
@@ -765,7 +768,7 @@ async function loadHistory(reset) {
   if (reset) hist.offset = 0;
   const seq = ++hist.seq;
   const who = viewing;
-  let url = `/api/history?group=${hist.group}&offset=${hist.offset}&limit=20`;
+  let url = `api/history?group=${hist.group}&offset=${hist.offset}&limit=20`;
   if (who) {
     if (reset) {
       $("#hist-summary").innerHTML = "";
@@ -776,7 +779,7 @@ async function loadHistory(reset) {
     if (seq !== hist.seq) return;
     if (!p.ok) { $("#hist-list").innerHTML = ""; return; } // o erro já aparece no cartão do jogador
     who.puuid = p.puuid;
-    url = `/api/player/history?${whoQuery()}&platform=${who.platform}&group=${hist.group}&offset=${hist.offset}&limit=20`;
+    url = `api/player/history?${whoQuery()}&platform=${who.platform}&group=${hist.group}&offset=${hist.offset}&limit=20`;
   }
   const data = await getJSON(url).catch(() => ({ ok: false, error: "Could not reach the app." }));
   if (seq !== hist.seq) return; // entretanto pediu-se outra página/filtro
@@ -889,16 +892,16 @@ async function toggleGame(id) {
     el.querySelectorAll(".gd-pane").forEach((p) => (p.hidden = p.dataset.v !== b.dataset.v));
     if (b.dataset.v === "map") openMap(id, el);
   }));
-  getJSON(`/api/history/${id}?${whoQuery()}`).then((d) => (el.querySelector('.gd-pane[data-v="board"]').innerHTML = scoreboardHtml(d)));
+  getJSON(`api/history/${id}?${whoQuery()}`).then((d) => (el.querySelector('.gd-pane[data-v="board"]').innerHTML = scoreboardHtml(d)));
   if (g.analysable) loadAnalysis(id, el);
 }
 
 async function loadAnalysis(id, el, force = false) {
   const pane = el.querySelector('.gd-pane[data-v="analysis"]');
-  let r = force ? null : (await getJSON(`/api/postgame/${encodeURIComponent(id)}?${whoQuery()}`)).report;
+  let r = force ? null : (await getJSON(`api/postgame/${encodeURIComponent(id)}?${whoQuery()}`)).report;
   if (!r || !r.detail) {
     pane.innerHTML = `<div class="loading">Analysing this game… (downloading the timeline from Riot)</div>`;
-    const res = await getJSON(`/api/postgame/analyse?match_id=${encodeURIComponent(id)}&${whoQuery()}`, { method: "POST" });
+    const res = await getJSON(`api/postgame/analyse?match_id=${encodeURIComponent(id)}&${whoQuery()}`, { method: "POST" });
     if (!res.ok) { pane.innerHTML = `<p class="muted">${esc(res.error || "Could not analyse this game.")}</p>`; return; }
     r = res.report;
     GAMES[id].has_report = true;
@@ -1241,8 +1244,8 @@ function wireMainsBuild(root, rep, state) {
 
 async function loadMainsList() {
   const [data, mine] = await Promise.all([
-    getJSON("/api/mains"),
-    getJSON("/api/my-mastery").catch(() => ({ ok: false, champions: [] })),
+    getJSON("api/mains"),
+    getJSON("api/my-mastery").catch(() => ({ ok: false, champions: [] })),
   ]);
   mainsState.champs = data.champions;
   mainsState.mine = mine.champions || [];
@@ -1294,7 +1297,7 @@ async function openMains(id, quiet = false) {
   mainsState.selected = id;
   renderMainsGrid();
   if (!quiet) $("#mains-panel").innerHTML = `<div class="loading">Loading…</div>`;
-  const rep = await getJSON(`/api/mains/${id}?sort=${mainsState.sort}`);
+  const rep = await getJSON(`api/mains/${id}?sort=${mainsState.sort}`);
   const last = rep.last_refresh ? +rep.last_refresh * 1000 : null;
   $("#mains-panel").innerHTML = `
     <div class="mains-head">${icon(rep.champion, "ico big")}<h2>${esc(rep.champion.name)}</h2>
@@ -1318,14 +1321,14 @@ async function openMains(id, quiet = false) {
   if (rep.sample) wireMainsBuild($("#mains-panel"), rep, mainsState);
   $("#mains-sort").addEventListener("change", (e) => { mainsState.sort = e.target.value; openMains(id); });
   $("#mains-refresh").addEventListener("click", async () => {
-    const res = await getJSON(`/api/mains/${id}/refresh`, { method: "POST" });
+    const res = await getJSON(`api/mains/${id}/refresh`, { method: "POST" });
     if (!res.ok && res.error) $('[data-jobview="mains_games"]').innerHTML = `<small class="bad">${esc(res.error)}</small>`;
   });
 }
 
 $("#mains-search").addEventListener("input", renderMainsGrid);
 $("#mastery-crawl").addEventListener("click", () =>
-  fetch("/api/mains/crawl", {
+  fetch("api/mains/crawl", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ regions: [...$$(".mastery-region:checked")].map((c) => c.value) }),
@@ -1494,7 +1497,7 @@ let OVERVIEW = null;
 const collect = { target: 1000, regions: ["euw1", "kr"], timelines: true, days: 30 };
 
 async function loadData() {
-  const o = await getJSON("/api/data/overview");
+  const o = await getJSON("api/data/overview");
   OVERVIEW = o;
   const m = o.mine, h = o.meta;
   $("#src-mine").innerHTML = `
@@ -1568,19 +1571,19 @@ async function loadData() {
   syncCollect();
   $("#collect-go").addEventListener("click", async () => {
     syncCollect();
-    const res = await getJSON("/api/meta/collect", {
+    const res = await getJSON("api/meta/collect", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target: collect.target, regions: collect.regions, days: collect.days, timelines: collect.timelines }),
     });
     if (!res.ok && res.error) $('[data-jobview="meta"]').innerHTML = `<small class="bad">${esc(res.error)}</small>`;
   });
-  $("#collect-stop").addEventListener("click", () => fetch("/api/jobs/meta/stop", { method: "POST" }));
-  $("#backfill-go")?.addEventListener("click", () => fetch("/api/meta/crawl", {
+  $("#collect-stop").addEventListener("click", () => fetch("api/jobs/meta/stop", { method: "POST" }));
+  $("#backfill-go")?.addEventListener("click", () => fetch("api/meta/crawl", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ regions: collect.regions, players: 0, timelines: true, backfill: 1000 }),
   }));
   $("#auto-enabled").checked = o.auto;
-  const a = await getJSON("/api/auto");
+  const a = await getJSON("api/auto");
   const when = (t) => ago(t ? t * 1000 : null);
   $("#auto-last").textContent = `Last automatic run: high elo games ${when(a.last.meta)} · top players ${when(a.last.mastery)} · your games ${when(a.last.sync)}`;
   // filtros do explorador
@@ -1590,7 +1593,7 @@ async function loadData() {
   renderJobs();
   loadExplorer();
 }
-$("#auto-enabled").addEventListener("change", (e) => fetch(`/api/auto?enabled=${e.target.checked}`, { method: "POST" }).then(loadData));
+$("#auto-enabled").addEventListener("change", (e) => fetch(`api/auto?enabled=${e.target.checked}`, { method: "POST" }).then(loadData));
 
 // ---------------------------------------------------------------- explorador de bonecos
 const ex = { source: "meta", role: "", sort: "games", dir: -1, rows: [], total: 0, open: null };
@@ -1613,7 +1616,7 @@ $$("#ex-table th[data-sort]").forEach((th) => th.addEventListener("click", () =>
 
 const exQuery = () => new URLSearchParams({ source: ex.source, role: ex.role, region: $("#ex-region").value, patch: $("#ex-patch").value });
 async function loadExplorer() {
-  const d = await getJSON(`/api/data/champions?${exQuery()}`);
+  const d = await getJSON(`api/data/champions?${exQuery()}`);
   ex.rows = d.champions;
   ex.total = d.total_games;
   ex.open = null;
@@ -1648,7 +1651,7 @@ function renderExplorer() {
 }
 
 async function loadExDetail(cid) {
-  const d = await getJSON(`/api/data/champion/${cid}?${exQuery()}`);
+  const d = await getJSON(`api/data/champion/${cid}?${exQuery()}`);
   const cell = $("#ex-table .ex-detail td");
   if (!cell || ex.open !== cid) return;
   const mu = (list, empty) => list.length ? `<ul class="mu-list">${list.map((u) => `
